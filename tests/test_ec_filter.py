@@ -47,3 +47,81 @@ def test_align_keeps_negative_lobes(synthetic_root):
     R200, _ = align_filter_to_wavelens(wl, R, WAVELENS_200)
     neg_cols = volt < 0.27
     assert R200[:133, neg_cols].max() <= 0.0 and R200[:133, neg_cols].min() < -0.9
+
+
+from data_loader.ec_filter import FILTER_DEAD_ZONE_V, candidate_indices, osp, select_filter_channels
+
+
+def _aligned(synthetic_root):
+    _, _, (wl, volt, R) = synthetic_root
+    R200, _ = align_filter_to_wavelens(wl, R, WAVELENS_200)
+    return R200, volt
+
+
+def _in_dead_zone(v):
+    lo, hi = FILTER_DEAD_ZONE_V
+    return (v >= lo) & (v <= hi)
+
+
+def test_candidate_indices_exclude_dead_zone(synthetic_root):
+    _, volt = _aligned(synthetic_root)
+    cand = candidate_indices(volt)
+    assert len(cand) == 351 - 7                                  # 0.25, 0.26, ..., 0.31 excluded
+    assert not _in_dead_zone(volt[cand]).any()
+    assert np.all(np.diff(cand) >= 1)
+
+
+def test_select_uniform(synthetic_root):
+    R200, volt = _aligned(synthetic_root)
+    sel = select_filter_channels(R200, volt, num_filters=30, mode='uniform')
+    assert len(sel) == 30 and len(set(sel)) == 30
+    assert sel[0] == 0 and sel[-1] == 350                        # spans the full voltage range
+    assert all(isinstance(i, int) for i in sel)
+    assert not _in_dead_zone(volt[sel]).any()
+
+
+def test_select_uniform_bounds(synthetic_root):
+    R200, volt = _aligned(synthetic_root)
+    assert select_filter_channels(R200, volt, num_filters=1, mode='uniform') == [0]
+    with pytest.raises(AssertionError):
+        select_filter_channels(R200, volt, num_filters=400, mode='uniform')
+
+
+def test_select_all(synthetic_root):
+    R200, volt = _aligned(synthetic_root)
+    sel = select_filter_channels(R200, volt, mode='all')
+    assert sel == candidate_indices(volt).tolist()
+
+
+def test_select_manual_nearest(synthetic_root):
+    R200, volt = _aligned(synthetic_root)
+    sel = select_filter_channels(R200, volt, mode='manual', filter_voltages=[-0.5, 1.004, 2.5])
+    np.testing.assert_allclose(volt[sel], [-0.5, 1.0, 2.5])
+    with pytest.raises(AssertionError, match="filter_voltages"):
+        select_filter_channels(R200, volt, mode='manual')
+
+
+def test_select_manual_warns_in_dead_zone(synthetic_root, capsys):
+    R200, volt = _aligned(synthetic_root)
+    sel = select_filter_channels(R200, volt, mode='manual', filter_voltages=[0.28])
+    assert np.isclose(volt[sel[0]], 0.28)
+    assert "dead zone" in capsys.readouterr().out
+
+
+def test_select_osp(synthetic_root):
+    R200, volt = _aligned(synthetic_root)
+    sel = select_filter_channels(R200, volt, num_filters=5, mode='osp')
+    assert len(sel) == 5 and len(set(sel)) == 5
+    assert not _in_dead_zone(volt[sel]).any()
+
+
+def test_osp_returns_indices_into_input():
+    X = np.eye(6)[:, :4]                                        # 4 orthogonal columns
+    X_sel, idx = osp(X, 3)
+    assert len(idx) == 3 and len(set(idx)) == 3 and X_sel.shape == (6, 3)
+
+
+def test_select_unknown_mode(synthetic_root):
+    R200, volt = _aligned(synthetic_root)
+    with pytest.raises(ValueError):
+        select_filter_channels(R200, volt, mode='random')
