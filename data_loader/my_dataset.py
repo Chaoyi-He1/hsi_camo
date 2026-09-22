@@ -30,8 +30,11 @@ class HyperCOD_data(Dataset.Dataset):
         self.crop_size = crop_size  # training crop at native resolution, 0 means full frame
         self.obj_crop_prob = obj_crop_prob  # probability that a training crop is placed to contain the object
         self.norm = norm  # 'none' or 'p99'
-        # the random module is re-seeded per DataLoader worker by PyTorch; a fixed seed is for reproducible tests
-        self.rng = random.Random(seed) if seed is not None else random
+        self.seed = seed
+        # never keep the random module itself on the instance: a module is not picklable, which breaks
+        # DataLoader workers with the spawn/forkserver start methods; see the rng property
+        self._rng = random.Random(seed) if seed is not None else None
+        self._rng_key = None
 
         assert self.split in ['train', 'test'], "split must be 'train' or 'test'"
         assert self.norm in ['none', 'p99'], "norm must be 'none' or 'p99'"
@@ -45,7 +48,10 @@ class HyperCOD_data(Dataset.Dataset):
         assert os.path.isdir(self.hsi_path), f"{self.hsi_path} does not exist"
         assert os.path.isdir(self.gt_path), f"{self.gt_path} does not exist"
 
-        self.img_name = sorted([os.path.splitext(f)[0] for f in os.listdir(self.hsi_path) if f.endswith('.mat')], key=int)
+        names = [os.path.splitext(f)[0] for f in os.listdir(self.hsi_path) if f.endswith('.mat')]
+        assert all(n.isdigit() for n in names), \
+            f"non-numeric .mat names in {self.hsi_path}: {[n for n in names if not n.isdigit()]}"
+        self.img_name = sorted(names, key=int)
         assert len(self.img_name) > 0, f"no .mat files found in {self.hsi_path}"
         for name in self.img_name:
             assert os.path.exists(os.path.join(self.gt_path, f'{name}.png')), f"GT for sample {name} not found in {self.gt_path}"
@@ -69,6 +75,24 @@ class HyperCOD_data(Dataset.Dataset):
     def __len__(self):
         return len(self.img_name)
 
+    @property
+    def rng(self):
+        '''
+        Random stream used for crop sampling.
+        seed is None (training default): the random module, which PyTorch re-seeds in every DataLoader
+        worker at every epoch, so crops differ across workers and epochs.
+        seed given (reproducible tests): a seeded random.Random in-process; inside a DataLoader worker a
+        fresh stream is derived from (seed, worker seed) so each worker and each epoch still gets
+        different crops instead of replaying the same ones.
+        '''
+        if self._rng is None:
+            return random
+        info = torch.utils.data.get_worker_info()
+        if info is not None and self._rng_key != info.seed:
+            self._rng = random.Random(f"{self.seed}:{info.seed}")
+            self._rng_key = info.seed
+        return self._rng
+
     def load_sensor_response(self):
         '''
         Load the EC detector response [401 wavelengths, 351 voltages], resample it onto the cube band
@@ -83,6 +107,9 @@ class HyperCOD_data(Dataset.Dataset):
                                                        mode=self.filter_select, filter_voltages=self.filter_voltages)
         self.selected_voltages = self.voltages[self.selected_indices]  # [N]
         self.sensor_R_matrix = R_aligned[:, self.selected_indices].astype(np.float32)  # [C, N]
+        # per-channel gain: with norm='p99' band values are ~1 at bright pixels, so a filter channel is
+        # ~filter_gain times larger (about 20-65 on the real EC filter); the training script can divide by it
+        self.filter_gain = np.abs(self.sensor_R_matrix).sum(axis=0)  # [N]
         print(f"Sensor response aligned: {self.sensor_R_matrix.shape[0]} bands x {self.sensor_R_matrix.shape[1]} channels, "
               f"{int(self.valid_band_mask.sum())} bands inside the sensor range, "
               f"voltages {np.round(self.selected_voltages, 2).tolist()}")
@@ -92,6 +119,7 @@ class HyperCOD_data(Dataset.Dataset):
         Per-sample scale = intensity_p99_valid / N_BANDS from intensity_p99_summary.csv, where the
         intensity map is the sum of the 200 bands. Dividing the cube by it puts bright-pixel band values
         near 1 and removes the ~40x scene-to-scene brightness spread.
+        Filter channels are then ~sum_b |R[b, n]| (self.filter_gain, about 20-65x) larger than single band values.
         '''
         csv_path = os.path.join(self.intensity_path, 'intensity_p99_summary.csv')
         assert os.path.exists(csv_path), f"{csv_path} not found (needed for norm='p99')"
@@ -127,7 +155,10 @@ class HyperCOD_data(Dataset.Dataset):
         '''
         with h5py.File(os.path.join(self.hsi_path, f'{name}.mat'), 'r') as f:
             blk = f[HYPERCUBE_KEY][:, w0:w0 + cw, h0:h0 + ch]
-        return np.asarray(blk, dtype=np.float32)
+        blk = np.asarray(blk, dtype=np.float32)
+        assert blk.shape == (N_BANDS, cw, ch), \
+            f"cube {name}: window (h0={h0}, w0={w0}, ch={ch}, cw={cw}) returned {blk.shape}, expected ({N_BANDS}, {cw}, {ch}); is this cube smaller than the first sample?"
+        return blk
 
     def crop_window(self, gt):
         '''
@@ -189,7 +220,8 @@ def add_dataset_args(parser):
     parser.add_argument('--filter_path', type=str, default=None,
                         help='EC sensor response .mat, default <data_path>/EC_filterV3.mat')
     parser.add_argument('--use_filter', action='store_true',
-                        help='feed the model the simulated EC detector channels instead of the raw 200 bands')
+                        help='feed the model the simulated EC detector channels instead of the raw 200 bands '
+                             '(CLI default off; the HyperCOD_data constructor defaults to use_filter=True)')
     parser.add_argument('--num_filters', type=int, default=30,
                         help='number of voltage channels for filter_select uniform / osp')
     parser.add_argument('--filter_select', type=str, default='uniform', choices=['uniform', 'osp', 'all', 'manual'],
@@ -201,7 +233,8 @@ def add_dataset_args(parser):
     parser.add_argument('--obj_crop_prob', type=float, default=0.5,
                         help='probability that a training crop is placed to contain the object')
     parser.add_argument('--norm', type=str, default='p99', choices=['none', 'p99'],
-                        help='per-sample scaling by intensity p99 / 200 from intensity_p99_summary.csv')
+                        help='per-sample scaling by intensity p99 / 200 from intensity_p99_summary.csv'
+                             '; note filter channels are ~20-65x larger than band values (see HyperCOD_data.filter_gain)')
     return parser
 
 

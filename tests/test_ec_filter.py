@@ -1,7 +1,9 @@
 import numpy as np
 import pytest
 
-from data_loader.ec_filter import (N_BANDS, WAVELENS_200, load_ec_filter, align_filter_to_wavelens)
+from data_loader.ec_filter import (N_BANDS, WAVELENS_200, FILTER_DEAD_ZONE_V, load_ec_filter,
+                                   align_filter_to_wavelens, in_dead_zone, candidate_indices, osp,
+                                   select_filter_channels)
 
 
 def test_wavelens_constant():
@@ -49,25 +51,17 @@ def test_align_keeps_negative_lobes(synthetic_root):
     assert R200[:133, neg_cols].max() <= 0.0 and R200[:133, neg_cols].min() < -0.9
 
 
-from data_loader.ec_filter import FILTER_DEAD_ZONE_V, candidate_indices, osp, select_filter_channels
-
-
 def _aligned(synthetic_root):
     _, _, (wl, volt, R) = synthetic_root
     R200, _ = align_filter_to_wavelens(wl, R, WAVELENS_200)
     return R200, volt
 
 
-def _in_dead_zone(v):
-    lo, hi = FILTER_DEAD_ZONE_V
-    return (v >= lo) & (v <= hi)
-
-
 def test_candidate_indices_exclude_dead_zone(synthetic_root):
     _, volt = _aligned(synthetic_root)
     cand = candidate_indices(volt)
     assert len(cand) == 351 - 7                                  # 0.25, 0.26, ..., 0.31 excluded
-    assert not _in_dead_zone(volt[cand]).any()
+    assert not in_dead_zone(volt[cand]).any()
     assert np.all(np.diff(cand) >= 1)
 
 
@@ -77,7 +71,7 @@ def test_select_uniform(synthetic_root):
     assert len(sel) == 30 and len(set(sel)) == 30
     assert sel[0] == 0 and sel[-1] == 350                        # spans the full voltage range
     assert all(isinstance(i, int) for i in sel)
-    assert not _in_dead_zone(volt[sel]).any()
+    assert not in_dead_zone(volt[sel]).any()
 
 
 def test_select_uniform_bounds(synthetic_root):
@@ -112,7 +106,7 @@ def test_select_osp(synthetic_root):
     R200, volt = _aligned(synthetic_root)
     sel = select_filter_channels(R200, volt, num_filters=5, mode='osp')
     assert len(sel) == 5 and len(set(sel)) == 5
-    assert not _in_dead_zone(volt[sel]).any()
+    assert not in_dead_zone(volt[sel]).any()
 
 
 def test_osp_returns_indices_into_input():
@@ -139,3 +133,15 @@ def test_select_osp_warns_when_rank_deficient(synthetic_root, capsys):
     sel = select_filter_channels(R_const, volt, num_filters=2, mode='osp')
     assert len(sel) == 1 and sel[0] == int(candidate_indices(volt)[0])
     assert "OSP stopped" in capsys.readouterr().out
+
+
+def test_in_dead_zone_boundaries():
+    assert in_dead_zone(0.25) and in_dead_zone(0.31) and in_dead_zone(0.29000000000000004)
+    assert not in_dead_zone(0.24) and not in_dead_zone(0.32) and not in_dead_zone(-0.29)
+    np.testing.assert_array_equal(in_dead_zone(np.array([0.2, 0.28, 0.4])), [False, True, False])
+
+
+def test_select_manual_rejects_duplicate_voltages(synthetic_root):
+    R200, volt = _aligned(synthetic_root)
+    with pytest.raises(AssertionError, match="duplicate"):
+        select_filter_channels(R200, volt, mode='manual', filter_voltages=[1.0, 1.001])

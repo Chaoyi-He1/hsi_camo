@@ -10,6 +10,15 @@ WAVELENS_200 = np.linspace(400.0, 1000.0, N_BANDS)
 # so these bias voltages are excluded from automatic channel selection
 FILTER_DEAD_ZONE_V = (0.25, 0.31)
 
+DEAD_ZONE_TOL_V = 1e-6  # tolerance for float noise in the voltage grid (the real file has e.g. 0.29000000000000004)
+
+
+def in_dead_zone(voltages, dead_zone=FILTER_DEAD_ZONE_V):
+    '''Boolean mask (or scalar) of voltages inside the polarity-flip dead zone, inclusive bounds.'''
+    lo, hi = dead_zone
+    v = np.asarray(voltages, dtype=np.float64)
+    return (v >= lo - DEAD_ZONE_TOL_V) & (v <= hi + DEAD_ZONE_TOL_V)
+
 
 def load_ec_filter(filter_path):
     '''
@@ -52,8 +61,7 @@ def align_filter_to_wavelens(sensor_wavelens, R, wavelens):
 
 def candidate_indices(voltages, dead_zone=FILTER_DEAD_ZONE_V):
     '''Indices of the voltages outside the polarity-flip dead zone (inclusive bounds, 1e-6 V tolerance).'''
-    lo, hi = dead_zone
-    return np.where((voltages < lo - 1e-6) | (voltages > hi + 1e-6))[0]
+    return np.where(~in_dead_zone(voltages, dead_zone))[0]
 
 
 def osp(X, num_channels):
@@ -67,8 +75,6 @@ def osp(X, num_channels):
     Returns:
         Selected channels from the sensor response matrix and their indices
     '''
-    C, N = X.shape
-
     X_min, X_max = X.min(), X.max()
     X = (X - X_min) / (X_max - X_min)  # Normalize to [0, 1]
 
@@ -112,17 +118,19 @@ def select_filter_channels(R, voltages, num_filters=30, mode='uniform', filter_v
               'osp'     - OSP selection among the candidates
               'all'     - every candidate voltage
               'manual'  - nearest voltage to each value in filter_voltages
+        filter_voltages: list of float, bias voltages in V used by mode 'manual'
+        dead_zone: (lo, hi) in V; voltages inside are excluded from automatic selection
     Returns:
         selected_indices: list[int] into the voltage axis
     '''
     cand = candidate_indices(voltages, dead_zone)
     assert len(cand) > 0, "no candidate voltages outside the dead zone"
-    if mode == 'uniform':
+    if mode in ('uniform', 'osp'):
         assert 1 <= num_filters <= len(cand), f"num_filters={num_filters} must be in [1, {len(cand)}]"
+    if mode == 'uniform':
         pos = np.linspace(0, len(cand) - 1, num_filters).round().astype(int)
         return cand[pos].tolist()
     if mode == 'osp':
-        assert 1 <= num_filters <= len(cand), f"num_filters={num_filters} must be in [1, {len(cand)}]"
         _, sel = osp(R[:, cand], num_filters)
         if len(sel) < num_filters:
             print(f"Warning: OSP stopped at {len(sel)} channels (residual exhausted), requested {num_filters}")
@@ -135,8 +143,10 @@ def select_filter_channels(R, voltages, num_filters=30, mode='uniform', filter_v
         sel = []
         for v in filter_voltages:
             idx = int(np.argmin(np.abs(voltages - v)))
-            if dead_zone[0] - 1e-6 <= voltages[idx] <= dead_zone[1] + 1e-6:
+            if in_dead_zone(voltages[idx], dead_zone):
                 print(f"Warning: requested voltage {v:+.2f} V maps to {voltages[idx]:+.2f} V inside the dead zone {dead_zone}")
             sel.append(idx)
+        assert len(set(sel)) == len(sel), \
+            f"filter_voltages {list(filter_voltages)} map to duplicate voltage channels {[round(float(voltages[i]), 2) for i in sel]}"
         return sel
     raise ValueError(f"unknown filter_select mode '{mode}', expected uniform | osp | all | manual")

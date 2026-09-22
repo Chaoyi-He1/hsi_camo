@@ -1,10 +1,12 @@
 import argparse
+import pickle
+import random
 import numpy as np
 import pytest
 import torch
 
 from data_loader.ec_filter import N_BANDS, WAVELENS_200, FILTER_DEAD_ZONE_V
-from data_loader.my_dataset import HyperCOD_data
+from data_loader.my_dataset import HyperCOD_data, image_collate_fn, add_dataset_args, build_dataset
 from tests.conftest import H, W, OBJ_SLICE
 
 
@@ -196,9 +198,6 @@ def test_getitem_p99_norm_scales_by_p99_over_bands(synthetic_root):
         np.testing.assert_allclose(img_p99, img_none / np.float32(p99 / N_BANDS), rtol=1e-5, atol=1e-6)
 
 
-from data_loader.my_dataset import image_collate_fn, add_dataset_args, build_dataset
-
-
 def test_collate_stacks_to_bchw(synthetic_root):
     root, _, _ = synthetic_root
     ds = make(root, use_filter=True, num_filters=30, crop_size=16, seed=6)
@@ -229,3 +228,50 @@ def test_build_dataset_from_args(synthetic_root):
     assert img.shape == (2, 16, 16)
     ds_test = build_dataset(args, split='test')
     assert ds_test.split == 'test' and ds_test[0][0].shape == (2, H, W)
+
+
+def test_dataset_is_picklable_when_unseeded(synthetic_root):
+    root, _, _ = synthetic_root
+    ds = make(root, seed=None)
+    assert ds.rng is random                                       # module resolved at use, never stored
+    ds2 = pickle.loads(pickle.dumps(ds))                          # spawn/forkserver workers need this
+    assert ds2.img_name == ds.img_name and ds2.rng is random
+
+
+def test_seeded_dataset_is_deterministic_in_process(synthetic_root):
+    root, _, _ = synthetic_root
+    a = [make(root, use_filter=False, crop_size=8, seed=7)[i][1] for i in range(2)]
+    b = [make(root, use_filter=False, crop_size=8, seed=7)[i][1] for i in range(2)]
+    for x, y in zip(a, b):
+        np.testing.assert_array_equal(x, y)
+
+
+def test_seeded_dataset_varies_crops_across_epochs_with_workers(synthetic_root):
+    root, _, _ = synthetic_root
+    ds = make(root, use_filter=False, crop_size=8, obj_crop_prob=0.0, seed=0)
+    loader = torch.utils.data.DataLoader(ds, batch_size=2, shuffle=False, num_workers=2,
+                                         persistent_workers=False, collate_fn=image_collate_fn)
+    epochs = [next(iter(loader))[0].clone() for _ in range(3)]    # img tensors [2, 200, 8, 8]
+    assert not (torch.equal(epochs[0], epochs[1]) and torch.equal(epochs[1], epochs[2]))
+
+
+def test_filter_gain(synthetic_root):
+    root, _, _ = synthetic_root
+    ds = make(root, num_filters=12)
+    assert ds.filter_gain.shape == (12,)
+    np.testing.assert_allclose(ds.filter_gain, np.abs(ds.sensor_R_matrix).sum(axis=0))
+    assert (ds.filter_gain > 0).all()
+
+
+def test_read_cube_block_asserts_on_clipped_window(synthetic_root):
+    root, _, _ = synthetic_root
+    ds = make(root)
+    with pytest.raises(AssertionError, match="window"):
+        ds.read_cube_block('3', h0=H - 4, w0=0, ch=16, cw=12)
+
+
+def test_init_asserts_non_numeric_mat_name(synthetic_root):
+    root, _, _ = synthetic_root
+    (root / 'train' / 'hyperspectral' / 'notes.mat').write_bytes(b'')
+    with pytest.raises(AssertionError, match="non-numeric"):
+        make(root)
