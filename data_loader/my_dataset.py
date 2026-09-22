@@ -173,3 +173,52 @@ class HyperCOD_data(Dataset.Dataset):
         img = np.ascontiguousarray(img.transpose(0, 2, 1), dtype=np.float32)  # [C, ch, cw]
         gt = gt[h0:h0 + ch, w0:w0 + cw].astype(np.float32)[None]  # [1, ch, cw]
         return img, gt, name
+
+
+def image_collate_fn(batch):
+    img, gt, name = list(zip(*batch))
+    # the dataset gives [C, H, W] / [1, H, W] numpy arrays; stack to [B, C, H, W] / [B, 1, H, W] float32 tensors
+    img = torch.from_numpy(np.stack(img, axis=0)).to(dtype=torch.float32)
+    gt = torch.from_numpy(np.stack(gt, axis=0)).to(dtype=torch.float32)
+    return img, gt, list(name)
+
+
+def add_dataset_args(parser):
+    parser.add_argument('--data_path', type=str, default='/data2/chaoyi/HyperCOD/Raw data',
+                        help='HyperCOD root containing train/ and test/')
+    parser.add_argument('--filter_path', type=str, default=None,
+                        help='EC sensor response .mat, default <data_path>/EC_filterV3.mat')
+    parser.add_argument('--use_filter', action='store_true',
+                        help='feed the model the simulated EC detector channels instead of the raw 200 bands')
+    parser.add_argument('--num_filters', type=int, default=30,
+                        help='number of voltage channels for filter_select uniform / osp')
+    parser.add_argument('--filter_select', type=str, default='uniform', choices=['uniform', 'osp', 'all', 'manual'],
+                        help='how to choose the bias voltages')
+    parser.add_argument('--filter_voltages', type=float, nargs='+', default=None,
+                        help='explicit bias voltages in V for filter_select manual')
+    parser.add_argument('--crop_size', type=int, default=512,
+                        help='training crop size at native resolution, 0 means full frame')
+    parser.add_argument('--obj_crop_prob', type=float, default=0.5,
+                        help='probability that a training crop is placed to contain the object')
+    parser.add_argument('--norm', type=str, default='p99', choices=['none', 'p99'],
+                        help='per-sample scaling by intensity p99 / 200 from intensity_p99_summary.csv')
+    return parser
+
+
+def build_dataset(args, split):
+    return HyperCOD_data(data_path=args.data_path, split=split, use_filter=args.use_filter,
+                         filter_path=args.filter_path, num_filters=args.num_filters,
+                         filter_select=args.filter_select, filter_voltages=args.filter_voltages,
+                         crop_size=args.crop_size, obj_crop_prob=args.obj_crop_prob, norm=args.norm)
+
+
+if __name__ == '__main__':
+    import time
+    parser = add_dataset_args(argparse.ArgumentParser(description='HyperCOD dataset smoke test'))
+    args = parser.parse_args()
+    dataset = build_dataset(args, split='train')
+    print(f"{len(dataset)} train samples, in_channels={dataset.in_channels}")
+    t = time.time()
+    img, gt, name = dataset[0]
+    print(f"sample {name}: img {img.shape} {img.dtype} range [{img.min():.4f}, {img.max():.4f}], "
+          f"gt {gt.shape} fg={int(gt.sum())} px, {time.time() - t:.2f}s")

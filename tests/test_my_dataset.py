@@ -194,3 +194,38 @@ def test_getitem_p99_norm_scales_by_p99_over_bands(synthetic_root):
         img_none, _, _ = make(root, split='test', use_filter=use_filter, norm='none')[0]
         img_p99, _, _ = make(root, split='test', use_filter=use_filter, norm='p99')[0]
         np.testing.assert_allclose(img_p99, img_none / np.float32(p99 / N_BANDS), rtol=1e-5, atol=1e-6)
+
+
+from data_loader.my_dataset import image_collate_fn, add_dataset_args, build_dataset
+
+
+def test_collate_stacks_to_bchw(synthetic_root):
+    root, _, _ = synthetic_root
+    ds = make(root, use_filter=True, num_filters=30, crop_size=16, seed=6)
+    loader = torch.utils.data.DataLoader(ds, batch_size=2, shuffle=False, collate_fn=image_collate_fn)
+    img, gt, names = next(iter(loader))
+    assert isinstance(img, torch.Tensor) and img.shape == (2, 30, 16, 16) and img.dtype == torch.float32
+    assert isinstance(gt, torch.Tensor) and gt.shape == (2, 1, 16, 16) and gt.dtype == torch.float32
+    assert names == ['3', '10']
+
+
+def test_add_dataset_args_defaults():
+    args = add_dataset_args(argparse.ArgumentParser()).parse_args([])
+    assert args.data_path == '/data2/chaoyi/HyperCOD/Raw data'
+    assert args.filter_path is None and args.use_filter is False
+    assert (args.num_filters, args.filter_select, args.filter_voltages) == (30, 'uniform', None)
+    assert (args.crop_size, args.obj_crop_prob, args.norm) == (512, 0.5, 'p99')
+
+
+def test_build_dataset_from_args(synthetic_root):
+    root, _, _ = synthetic_root
+    parser = add_dataset_args(argparse.ArgumentParser())
+    args = parser.parse_args(['--data_path', str(root), '--use_filter', '--crop_size', '16',
+                              '--filter_select', 'manual', '--filter_voltages', '-0.5', '1.0', '--norm', 'none'])
+    ds = build_dataset(args, split='train')
+    assert ds.use_filter and ds.in_channels == 2 and ds.crop_size == 16 and ds.norm == 'none'
+    np.testing.assert_allclose(ds.selected_voltages, [-0.5, 1.0])
+    img, gt, name = ds[0]
+    assert img.shape == (2, 16, 16)
+    ds_test = build_dataset(args, split='test')
+    assert ds_test.split == 'test' and ds_test[0][0].shape == (2, H, W)
