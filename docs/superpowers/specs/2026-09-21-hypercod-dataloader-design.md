@@ -110,6 +110,8 @@ Tests:
 
 Plus the `__main__` smoke test on a real sample (manual).
 
+Regression tests added by the reviews: `osp` stops on rank-deficient input without duplicates and the shortfall warning fires; `in_dead_zone` boundaries (0.25, 0.31, float-noise 0.29000000000000004); `manual` rejects duplicate voltages; the unseeded dataset is picklable; a seeded dataset is deterministic in-process yet varies crops across epochs with `num_workers=2`; `filter_gain` equals `|R|.sum(0)`; `read_cube_block` asserts on a clipped window; non-numeric `.mat` names are rejected. Total: 46 tests.
+
 ## Out of scope
 
 Augmentation beyond cropping, caching, RGB/intensity-map outputs, sliding-window inference, model code.
