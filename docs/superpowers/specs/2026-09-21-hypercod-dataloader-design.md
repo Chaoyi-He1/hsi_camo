@@ -46,9 +46,11 @@ class HyperCOD_data(Dataset.Dataset):
                  crop_size=512, obj_crop_prob=0.5, norm='p99', seed=None)
 ```
 
-`seed` (optional int) seeds the dataset's own `random.Random` used for crop sampling, for reproducible tests; `None` uses an unseeded generator.
+`seed` (optional int) makes crop sampling reproducible: in-process the dataset uses `random.Random(seed)`; inside a DataLoader worker a fresh stream is derived from `(seed, worker seed)` so workers and epochs still get different crops. `None` (training default) uses the `random` module, which PyTorch re-seeds per worker and per epoch. The `random` module is never stored on the instance (a module is unpicklable, which would break `spawn`/`forkserver` workers); it is resolved through the `rng` property.
 
-Attributes after init: `img_name` (list of id strings), `wavelens [200]`, `sensor_wavelens [401]`, `voltages [351]`, `sensor_R_matrix [200, N]`, `selected_indices`, `selected_voltages`, `valid_band_mask [200]` (≤ 800 nm), `scale` (dict id → float, or None), `in_channels` (N or 200), `H, W = 1680, 1240`.
+Attributes after init: `img_name` (list of id strings), `wavelens [200]`, `sensor_wavelens [401]`, `voltages [351]`, `sensor_R_matrix [200, N]`, `filter_gain [N]` (= `|R|.sum(0)`, the per-channel gain), `selected_indices`, `selected_voltages`, `valid_band_mask [200]` (≤ 800 nm), `scale` (dict id → float, or None), `in_channels` (N or 200), `H, W = 1680, 1240`.
+
+Output scale: with `norm='p99'` bright-pixel *band* values sit near 1, so a filter channel (a weighted sum over ~133 bands) is `filter_gain` ≈ 20–65× larger than a raw band on the real EC filter, and the gain differs ~3× between voltages. The dataloader deliberately does not rescale the filter outputs (the columns are already peak-normalised, and the training script may prefer `BatchNorm2d(in_channels, affine=False)` or a fixed `1/filter_gain`); the training script must choose one before comparing `use_filter` on/off runs. An opt-in per-column L1 normalisation is a possible follow-up.
 
 Methods:
 - `load_sensor_response()` — load `.mat`, validate keys/shapes, align to `wavelens` (see Decisions), select channels.
@@ -56,7 +58,7 @@ Methods:
 - `load_intensity_scale()` — parse CSV into `self.scale` when `norm == 'p99'`.
 - `crop_window(gt)` → `(h0, w0, ch, cw)`; training: with prob `obj_crop_prob` and a non-empty mask, pick a random foreground pixel `(hs, ws)` and draw `h0 ~ U[max(0, hs-ch+1), min(hs, H-ch)]` (same for w) so the crop contains it; otherwise uniform. Test or `crop_size == 0`: full frame.
 - `load_gt(name)` → bool `[H, W]`.
-- `read_cube_block(name, h0, w0, ch, cw)` → float32 `[200, cw, ch]` via `h5py.File(...)['hypercube'][:, w0:w0+cw, h0:h0+ch]` (file opened per call, worker-safe).
+- `read_cube_block(name, h0, w0, ch, cw)` → float32 `[200, cw, ch]` via `h5py.File(...)['hypercube'][:, w0:w0+cw, h0:h0+ch]` (file opened per call, worker-safe); asserts the returned shape, because h5py silently clips a window that runs past the dataset edge (a later cube smaller than the first sample would otherwise surface as a confusing collate error).
 - `__getitem__(idx)` → `(img, gt, name)`:
   - `img`: float32 numpy `[C, ch, cw]`, C = N (filter: `np.tensordot(R.T, blk, axes=(1, 0))` then swap axes) or 200 (raw: swap axes only); scaled by `1/scale[name]` when `norm == 'p99'`.
   - `gt`: float32 numpy `[1, ch, cw]` in {0, 1}.
@@ -65,8 +67,10 @@ Methods:
 
 Module level:
 - `image_collate_fn(batch)` → `img [B, C, H, W]` float32 tensor, `gt [B, 1, H, W]` float32 tensor, `names list[str]`.
-- `osp(X, num_channels)` — copied from the previous project (index selection).
-- `add_dataset_args(parser)` — adds `--data_path`, `--filter_path`, `--use_filter`, `--num_filters`, `--filter_select`, `--filter_voltages`, `--crop_size`, `--obj_crop_prob`, `--norm`.
+- `osp(X, num_channels)` — copied from the previous project (index selection), with one fix: the exhausted-residual check runs before the index is appended, so rank-deficient inputs return unique indices. Open question (spec-level, opt-in mode only): the inherited global min–max shift maps the 67 zero rows above 800 nm to a constant and adds a DC offset to every column, which changes which voltages OSP picks (18/30 agree with an offset-free run on the real filter); dropping the shift or running on `R[valid_band_mask]` is the candidate fix.
+- `add_dataset_args(parser)` — adds `--data_path`, `--filter_path`, `--use_filter`, `--num_filters`, `--filter_select`, `--filter_voltages`, `--crop_size`, `--obj_crop_prob`, `--norm`. Note the asymmetry: `--use_filter` is a `store_true` flag (off unless passed, matching "if `args.use_filter`"), while the constructor default is `use_filter=True`.
+
+Selection functions live in `data_loader/ec_filter.py` (`load_ec_filter`, `align_filter_to_wavelens`, `in_dead_zone`, `candidate_indices`, `osp`, `select_filter_channels`) so they are testable without a dataset; `my_dataset.py` only calls them.
 - `build_dataset(args, split)` — maps the namespace onto the constructor (`use_filter=args.use_filter`, ...).
 - `if __name__ == '__main__':` smoke test on one real train sample (prints shapes, selected voltages, timing).
 
@@ -87,7 +91,7 @@ mask[h0:h0+ch, w0:w0+cw] ──────────────────�
 
 ## Error handling
 
-Asserts with f-string messages (previous style): `data_path`/split folders/filter file exist; every cube has a GT; filter `.mat` has the three keys with consistent shapes; `hypercube` shape is `(200, W, H)` matching the GT `(H, W)` (checked on the first sample at init); `crop_size <= min(H, W)`; `filter_select == 'manual'` requires `filter_voltages`; `num_filters <= number of candidates`. Printed warnings: a manual voltage inside the dead zone; a sample with an empty mask (falls back to a uniform crop). Files are never modified.
+Asserts with f-string messages (previous style): `data_path`/split folders/filter file exist; every cube has a GT; filter `.mat` has the three keys with consistent shapes; `hypercube` shape is `(200, W, H)` matching the GT `(H, W)` (checked on the first sample at init); `crop_size <= min(H, W)`; `filter_select == 'manual'` requires `filter_voltages` and rejects voltages that map to the same channel; `num_filters <= number of candidates`; `.mat` stems are numeric; `read_cube_block` returns the requested window size. Printed warnings: a manual voltage inside the dead zone; OSP returning fewer channels than requested. A sample with an empty mask silently falls back to a uniform crop (a per-`__getitem__` print would repeat every epoch). Files are never modified.
 
 ## Testing (`tests/test_my_dataset.py`, pytest)
 

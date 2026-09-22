@@ -4,3 +4,4 @@ __pycache__/
 results/
 *.pth
 *.log
+.superpowers/
