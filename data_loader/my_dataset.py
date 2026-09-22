@@ -159,7 +159,15 @@ class HyperCOD_data(Dataset.Dataset):
         h0, w0, ch, cw = self.crop_window(gt)
 
         blk = self.read_cube_block(name, h0, w0, ch, cw)  # [B, cw, ch] float32
-        img = blk  # raw bands
+        if self.norm == 'p99':
+            # positive per-sample scalar, so scaling before or after the filter is identical
+            blk /= np.float32(self.scale[name])
+
+        if self.use_filter:
+            # simulated detector channels: y_n = sum_b R[b, n] * cube[b], done in the h5 layout -> [N, cw, ch]
+            img = np.tensordot(self.sensor_R_matrix.T, blk, axes=(1, 0))
+        else:
+            img = blk  # raw bands [B, cw, ch]
 
         # only the last two axes are swapped: [C, cw, ch] -> [C, ch, cw]; never build [H, W, B] (6 s per crop)
         img = np.ascontiguousarray(img.transpose(0, 2, 1), dtype=np.float32)  # [C, ch, cw]

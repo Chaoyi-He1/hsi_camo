@@ -157,3 +157,40 @@ def test_getitem_raw_crop(synthetic_root):
     assert img.shape == (N_BANDS, 16, 16) and gt.shape == (1, 16, 16)
     assert gt.sum() > 0
     assert set(np.unique(gt)) <= {0.0, 1.0}
+
+
+def test_getitem_filter_equals_einsum_on_raw(synthetic_root):
+    root, _, _ = synthetic_root
+    ds_f = make(root, split='test', use_filter=True, num_filters=30)
+    ds_r = make(root, split='test', use_filter=False)
+    img_f, gt_f, name = ds_f[0]
+    img_r, gt_r, _ = ds_r[0]
+    assert img_f.shape == (30, H, W) and img_f.dtype == np.float32 and img_f.flags['C_CONTIGUOUS']
+    expected = np.einsum('bn,bhw->nhw', ds_f.sensor_R_matrix, img_r)   # y_n = sum_b R[b, n] * cube[b]
+    np.testing.assert_allclose(img_f, expected, rtol=1e-5, atol=1e-6)
+    np.testing.assert_array_equal(gt_f, gt_r)
+
+
+def test_getitem_filter_uses_only_bands_below_800nm(synthetic_root):
+    root, _, _ = synthetic_root
+    ds = make(root, split='test', use_filter=True)
+    img_r, _, _ = make(root, split='test', use_filter=False)[0]
+    img_f, _, _ = ds[0]
+    expected = np.einsum('bn,bhw->nhw', ds.sensor_R_matrix[:133], img_r[:133])
+    np.testing.assert_allclose(img_f, expected, rtol=1e-5, atol=1e-6)
+
+
+def test_getitem_filter_crop_shape(synthetic_root):
+    root, _, _ = synthetic_root
+    ds = make(root, use_filter=True, num_filters=8, crop_size=16, seed=5)
+    img, gt, _ = ds[0]
+    assert img.shape == (8, 16, 16) and gt.shape == (1, 16, 16)
+
+
+def test_getitem_p99_norm_scales_by_p99_over_bands(synthetic_root):
+    root, info, _ = synthetic_root
+    p99 = info[('test', '7')][2]
+    for use_filter in (False, True):
+        img_none, _, _ = make(root, split='test', use_filter=use_filter, norm='none')[0]
+        img_p99, _, _ = make(root, split='test', use_filter=use_filter, norm='p99')[0]
+        np.testing.assert_allclose(img_p99, img_none / np.float32(p99 / N_BANDS), rtol=1e-5, atol=1e-6)
