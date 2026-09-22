@@ -79,15 +79,16 @@ def osp(X, num_channels):
         # Compute the norms of each sensor response in the residual
         norms = np.linalg.norm(residual, axis=0)  # [N]
         selected_index = int(np.argmax(norms))
+
+        # Stop BEFORE selecting when the residual is exhausted (input rank < num_channels);
+        # otherwise a degenerate or duplicate column would be appended
+        norm_squared = float(norms[selected_index] ** 2)
+        if norm_squared < 1e-12:
+            break
         selected_indices.append(selected_index)
 
         # Get the selected sensor response
         selected_response = residual[:, selected_index].reshape(-1, 1)  # [C, 1]
-
-        # Avoid division by zero - compute squared norm (||v||²)
-        norm_squared = np.linalg.norm(selected_response) ** 2
-        if norm_squared < 1e-12:
-            break
 
         # Project out the selected response from all remaining columns
         projection_matrix = (selected_response @ selected_response.T) / norm_squared  # [C, C]

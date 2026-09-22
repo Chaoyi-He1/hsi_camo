@@ -125,3 +125,17 @@ def test_select_unknown_mode(synthetic_root):
     R200, volt = _aligned(synthetic_root)
     with pytest.raises(ValueError):
         select_filter_channels(R200, volt, mode='random')
+
+
+def test_osp_stops_on_rank_deficient_input_without_duplicates():
+    X = np.array([[1.0, 1.0, 0.0], [0.0, 0.0, 0.0]])          # column 0 == column 1, rank 1
+    _, idx = osp(X, 3)
+    assert idx == [0]                                          # residual exhausted after one pick: stop, no duplicate
+
+
+def test_select_osp_warns_when_rank_deficient(synthetic_root, capsys):
+    _, _, (wl, volt, R) = synthetic_root
+    R_const = np.tile(np.linspace(0.0, 1.0, 200)[:, None], (1, len(volt)))   # every voltage column identical
+    sel = select_filter_channels(R_const, volt, num_filters=2, mode='osp')
+    assert len(sel) == 1 and sel[0] == int(candidate_indices(volt)[0])
+    assert "OSP stopped" in capsys.readouterr().out
