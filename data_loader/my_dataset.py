@@ -118,3 +118,50 @@ class HyperCOD_data(Dataset.Dataset):
             shape = f[HYPERCUBE_KEY].shape
         assert shape == (N_BANDS, self.W, self.H), \
             f"cube {name} has shape {shape}, expected (bands, W, H) = ({N_BANDS}, {self.W}, {self.H})"
+
+    def read_cube_block(self, name, h0, w0, ch, cw):
+        '''
+        Read a spatial window of the cube directly from the .mat (HDF5) file.
+        h5py layout is [B, W, H], so W is indexed with w0:w0+cw and H with h0:h0+ch.
+        Returns float32 [B, cw, ch]. The file is opened per call so DataLoader workers stay independent.
+        '''
+        with h5py.File(os.path.join(self.hsi_path, f'{name}.mat'), 'r') as f:
+            blk = f[HYPERCUBE_KEY][:, w0:w0 + cw, h0:h0 + ch]
+        return np.asarray(blk, dtype=np.float32)
+
+    def crop_window(self, gt):
+        '''
+        Choose the crop (h0, w0, ch, cw).
+        Train with crop_size > 0: with probability obj_crop_prob (and a non-empty mask) pick a random
+        foreground pixel and place the crop uniformly among the positions that contain it; otherwise a
+        uniform random crop. Test split or crop_size == 0: the full frame.
+        gt: bool [H, W]
+        '''
+        H, W = gt.shape
+        if self.split != 'train' or self.crop_size <= 0:
+            return 0, 0, H, W
+        cs = self.crop_size
+        fg_h, fg_w = np.nonzero(gt)
+        if len(fg_h) > 0 and self.rng.random() < self.obj_crop_prob:
+            k = self.rng.randrange(len(fg_h))
+            hs, ws = int(fg_h[k]), int(fg_w[k])
+            # top-left must satisfy h0 <= hs <= h0 + cs - 1 and 0 <= h0 <= H - cs (same for w)
+            h0 = self.rng.randint(max(0, hs - cs + 1), min(hs, H - cs))
+            w0 = self.rng.randint(max(0, ws - cs + 1), min(ws, W - cs))
+        else:
+            h0 = self.rng.randint(0, H - cs)
+            w0 = self.rng.randint(0, W - cs)
+        return h0, w0, cs, cs
+
+    def __getitem__(self, idx):
+        name = self.img_name[idx]
+        gt = self.load_gt(name)  # [H, W] bool
+        h0, w0, ch, cw = self.crop_window(gt)
+
+        blk = self.read_cube_block(name, h0, w0, ch, cw)  # [B, cw, ch] float32
+        img = blk  # raw bands
+
+        # only the last two axes are swapped: [C, cw, ch] -> [C, ch, cw]; never build [H, W, B] (6 s per crop)
+        img = np.ascontiguousarray(img.transpose(0, 2, 1), dtype=np.float32)  # [C, ch, cw]
+        gt = gt[h0:h0 + ch, w0:w0 + cw].astype(np.float32)[None]  # [1, ch, cw]
+        return img, gt, name

@@ -89,3 +89,71 @@ def test_load_gt_thresholds_channel_0(synthetic_root):
     assert gt.dtype == bool and gt.shape == (H, W)
     np.testing.assert_array_equal(gt, info[('train', '3')][1])
     assert gt[OBJ_SLICE].all() and gt.sum() == 36
+
+
+def test_read_cube_block_matches_h5_layout(synthetic_root):
+    root, info, _ = synthetic_root
+    ds = make(root)
+    cube = info[('train', '3')][0]                                # [B, W, H]
+    blk = ds.read_cube_block('3', h0=5, w0=7, ch=16, cw=12)
+    assert blk.shape == (N_BANDS, 12, 16) and blk.dtype == np.float32
+    np.testing.assert_array_equal(blk, cube[:, 7:19, 5:21])
+
+
+def test_crop_window_full_frame_for_test_split_or_zero_crop(synthetic_root):
+    root, info, _ = synthetic_root
+    gt = info[('train', '3')][1]
+    assert make(root, split='test').crop_window(info[('test', '7')][1]) == (0, 0, H, W)
+    assert make(root, crop_size=0).crop_window(gt) == (0, 0, H, W)
+
+
+def test_crop_window_object_biased_contains_object(synthetic_root):
+    root, info, _ = synthetic_root
+    ds = make(root, crop_size=8, obj_crop_prob=1.0, seed=1)
+    gt = info[('train', '3')][1]
+    for _ in range(200):
+        h0, w0, ch, cw = ds.crop_window(gt)
+        assert (ch, cw) == (8, 8)
+        assert 0 <= h0 <= H - 8 and 0 <= w0 <= W - 8
+        assert gt[h0:h0 + 8, w0:w0 + 8].any()
+
+
+def test_crop_window_uniform_stays_in_bounds(synthetic_root):
+    root, info, _ = synthetic_root
+    ds = make(root, crop_size=16, obj_crop_prob=0.0, seed=2)
+    gt = info[('train', '3')][1]
+    seen_outside_object = False
+    for _ in range(200):
+        h0, w0, ch, cw = ds.crop_window(gt)
+        assert 0 <= h0 <= H - 16 and 0 <= w0 <= W - 16
+        seen_outside_object |= not gt[h0:h0 + 16, w0:w0 + 16].any()
+    assert seen_outside_object                                   # uniform crops do miss the object sometimes
+
+
+def test_crop_window_empty_mask_falls_back_to_uniform(synthetic_root):
+    root, _, _ = synthetic_root
+    ds = make(root, crop_size=16, obj_crop_prob=1.0, seed=3)
+    h0, w0, ch, cw = ds.crop_window(np.zeros((H, W), dtype=bool))
+    assert (ch, cw) == (16, 16) and 0 <= h0 <= H - 16 and 0 <= w0 <= W - 16
+
+
+def test_getitem_raw_full_frame_values(synthetic_root):
+    root, info, _ = synthetic_root
+    ds = make(root, split='test', use_filter=False)
+    img, gt, name = ds[0]
+    cube, gt_true, _ = info[('test', '7')]
+    assert name == '7'
+    assert img.shape == (N_BANDS, H, W) and img.dtype == np.float32 and img.flags['C_CONTIGUOUS']
+    np.testing.assert_array_equal(img, cube.transpose(0, 2, 1))   # [B, W, H] -> [B, H, W]
+    assert gt.shape == (1, H, W) and gt.dtype == np.float32
+    np.testing.assert_array_equal(gt[0], gt_true.astype(np.float32))
+
+
+def test_getitem_raw_crop(synthetic_root):
+    root, info, _ = synthetic_root
+    ds = make(root, use_filter=False, crop_size=16, obj_crop_prob=1.0, seed=4)
+    img, gt, name = ds[1]
+    assert name == '10'
+    assert img.shape == (N_BANDS, 16, 16) and gt.shape == (1, 16, 16)
+    assert gt.sum() > 0
+    assert set(np.unique(gt)) <= {0.0, 1.0}
