@@ -168,7 +168,8 @@ Asserts with f-string messages (project style): cache file missing → message w
 
 ## 10. Open items
 
-- **W&B entity:** the API key works but the account has no team/entity yet (`wandb.init` fails with "entity not specified" / "entity … not found"). The user creates a team on wandb.ai and passes `--wandb-entity <team>` (also stored in `cfg/det.yaml`); until then the logger runs offline.
+- **W&B entity — resolved:** the account had no personal entity, so the team **`chaoyi-hsi`** was created through the API (user-authorised); `--wandb-entity` defaults to it and an online run was verified (`https://wandb.ai/chaoyi-hsi/hsi_camo`). Offline fallback stays in place.
+- **Environment:** a new conda env **`hsi_camo`** (Python 3.12, PyTorch 2.14 cu128 wheels — driver 575.57 supports CUDA ≤ 12.9 — plus numpy/scipy/h5py/pillow/pytest/ultralytics/wandb/tensorboard/matplotlib/pyyaml) is used for this stage; `hsi` (torch 2.8) is left untouched for the user's other projects. All commands in this spec run with `/home/grads/c/chaoyi_he/Desktop/conda/envs/hsi_camo/bin/python`.
 - **Weight-vector parameterisation:** `N·softmax(θ)` + entropy penalty is the default; plain `(1, N, 1, 1)` parameter + L1 is a two-line alternative if preferred.
 - **Stage 2 (segmentation on ROIs):** separate spec; consumes `results/det/rois_*.json` and the existing crop loader with explicit windows; repeats all-344 → top-10.
 
