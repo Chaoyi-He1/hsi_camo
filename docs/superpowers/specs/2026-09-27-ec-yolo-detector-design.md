@@ -169,7 +169,7 @@ Asserts with f-string messages (project style): cache file missing → message w
 ## 10. Open items
 
 - **W&B entity — resolved:** the account had no personal entity, so the team **`chaoyi-hsi`** was created through the API (user-authorised); `--wandb-entity` defaults to it and an online run was verified (`https://wandb.ai/chaoyi-hsi/hsi_camo`). Offline fallback stays in place.
-- **Environment:** a new conda env **`hsi_camo`** (Python 3.12, PyTorch 2.14 cu128 wheels — driver 575.57 supports CUDA ≤ 12.9 — plus numpy/scipy/h5py/pillow/pytest/ultralytics/wandb/tensorboard/matplotlib/pyyaml) is used for this stage; `hsi` (torch 2.8) is left untouched for the user's other projects. All commands in this spec run with `/home/grads/c/chaoyi_he/Desktop/conda/envs/hsi_camo/bin/python`.
+- **Environment:** a new conda env **`hsi_camo`** (Python 3.12.14, PyTorch **2.11.0+cu128** — the newest build that runs on driver 575.57 / CUDA ≤ 12.9; PyTorch 2.14 is CUDA-13-only and would need a driver ≥ 580 — torchvision 0.26, numpy 2.5, scipy 1.18, h5py 3.16, pillow 12.3, ultralytics 8.4.164, wandb 0.30, tensorboard, matplotlib, pyyaml, pytest) is used for this stage; `hsi` (torch 2.8) is left untouched for the user's other projects. All commands in this spec run with `/home/grads/c/chaoyi_he/Desktop/conda/envs/hsi_camo/bin/python`; the existing 56 loader tests pass there and the YOLO26 memory probe reproduces 9.0 GB peak.
 - **Weight-vector parameterisation:** `N·softmax(θ)` + entropy penalty is the default; plain `(1, N, 1, 1)` parameter + L1 is a two-line alternative if preferred.
 - **Stage 2 (segmentation on ROIs):** separate spec; consumes `results/det/rois_*.json` and the existing crop loader with explicit windows; repeats all-344 → top-10.
 
