@@ -47,8 +47,8 @@ Reproduce the "top-10 filter responses" recipe of the previous HSI project on Hy
 main_det.py                        entry: usage docstring (single GPU / torchrun); get_args_parser(); main(args)
 cfg/det.yaml                       lr, lrf, epochs, batch_size, accumulate, gate_entropy_weight, top_k, roi_margin, conf/iou thresholds
 data_loader/cube_cache.py          build_cube_cache(data_path, split, band_range, num_workers) -> <data_path>/cache_fp16/<split>/<id>.npy ; also __main__
-data_loader/boxes.py               boxes_from_mask(mask, min_area=100) -> [K, 4] xyxy px
-data_loader/frames_dataset.py      HyperCOD_frames(Dataset), det_collate_fn
+data_loader/boxes.py               boxes_from_mask(mask, min_area=100) -> [K, 4] xyxy px ; boxes_to_yolo ; flip_boxes ; det_collate_fn
+data_loader/my_dataset.py          HyperCOD_data gains cache_dir=, ids=, out_dtype=, band_range= and filter_bank_tensors()  (no new dataset class)
 data_loader/splits/det_val_ids.json
 models/filter_bank.py              FilterBank(nn.Module)
 models/ec_yolo.py                  build_ec_yolo(args, dataset), replace_first_conv, load_pretrained_yolo, select_top_k, slice_to_channels, decode_predictions
@@ -71,41 +71,39 @@ weights/det_A/, weights/det_B/     model_{epoch}, model_best (git-ignored); runs
 
 ### 5.2 `data_loader/cube_cache.py`
 - `build_cube_cache(data_path, split, band_range=(400, 800), num_workers=8, overwrite=False)`: for each `<id>.mat`, read `hypercube` once (full), slice the band window, swap to `[n_bands, H, W]`, store `np.float16` `.npy` at `<data_path>/cache_fp16/<split>/<id>.npy`; also computes the windowed p99 (§5.1) and writes the `intensity_p99_<lo>_<hi>.csv` rows. Worker pool = `torch.utils.data.DataLoader` over a tiny reader dataset (same pattern as `compute_band_stats`). Skips existing files unless `overwrite`. Prints progress every 25 cubes. `__main__` with `--data_path --split {train,test,all} --num_workers --band_range`.
-- `cache_path(data_path, split, name)` helper used by the frames dataset; the frames dataset asserts the cache exists and prints the build command otherwise (no silent 45-minute build inside a training script).
+- `cache_path(cache_dir, split, name)` helper used by `HyperCOD_data.read_cube_block`; when `cache_dir` is given the dataset asserts the cache exists and prints the build command otherwise (no silent 45-minute build inside a training script).
 
 ### 5.3 `data_loader/boxes.py`
 - `boxes_from_mask(mask: bool [H, W], min_area=100) -> np.ndarray [K, 4] float32 xyxy` (x1, y1 inclusive; x2, y2 exclusive pixel edges), via `scipy.ndimage.label`; components with area < `min_area` dropped; `K = 0` allowed (empty array `[0, 4]`).
 - `boxes_to_yolo(boxes, H, W) -> [K, 4] normalised cx, cy, w, h` for the loss; `flip_boxes(boxes, H, W, horizontal, vertical)`.
+- `det_collate_fn(batch)`: takes the `(img, gt, name)` tuples of `HyperCOD_data` (full frames, `use_filter=False`, `norm='p99'`, `out_dtype='float16'`), derives boxes from each mask with `boxes_from_mask`, and returns `{'img': [B, n_bands, H, W] fp16, 'batch_idx': [ΣK], 'cls': [ΣK, 1] zeros, 'bboxes': [ΣK, 4] normalised cx,cy,w,h (÷ W, H), 'boxes_xyxy': list of [K, 4] px, 'names': list[str]}` — `img/batch_idx/cls/bboxes` are exactly the keys `model.loss` reads. Zero-padding to stride multiples and the random h/v flips (of `img` and boxes together) are done on the GPU in `train_one_epoch` — cheaper than in the workers, and no dataset change.
 
-### 5.4 `data_loader/frames_dataset.py`
-```python
-class HyperCOD_frames(Dataset.Dataset):
-    def __init__(self, data_path, split='train', ids=None, band_range=(400., 800.), pad_to=32,
-                 flip=True, filter_path=None, num_filters=30, filter_select='all', filter_voltages=None,
-                 filter_norm='l1', stats_path=None, seed=None)
-```
-- Reuses `HyperCOD_data` machinery for the filter matrix and stats: internally builds a `HyperCOD_data(split, use_filter=True, filter_select=..., norm='p99z', band_range=...)` once and exposes `filter_bank_tensors()` → `(R [n_bands, N] float32, channel_mean [N], channel_std [N], selected_voltages [N])` for the model; the frames dataset itself only returns cube tensors.
-- `ids`: explicit list of sample ids (train / val split); `None` = all ids of the split.
-- `__getitem__(idx)` → dict `{'img': fp16 tensor [n_bands, Hp, Wp] (zero-padded to multiples of pad_to at the bottom/right), 'scale': float (p99 scale of the frame), 'boxes': float32 tensor [K, 4] xyxy px in the padded frame, 'name': str, 'orig_size': (H, W)}`; training flips applied to `img` and `boxes` with probability 0.5 each (h and v).
-- `det_collate_fn(batch)` → `{'img': [B, n_bands, Hp, Wp] fp16, 'scale': [B] float32, 'batch_idx': [ΣK], 'cls': [ΣK, 1] zeros, 'bboxes': [ΣK, 4] normalised cx,cy,w,h (÷ Wp, Hp), 'boxes_xyxy': list of [K, 4] px, 'names': list[str]}` — the `img/batch_idx/cls/bboxes` keys are exactly what `model.loss` reads.
+### 5.4 Reusing `HyperCOD_data` for full frames (no new dataset class)
+Additive options on the existing class, all default to today's behaviour:
+- `cache_dir=None`: when set, `read_cube_block` loads `cache_path(cache_dir, split, name)` (`np.load(..., mmap_mode='r')`, fp16 `[n_bands, H, W]`, sliced `[:, h0:h0+ch, w0:w0+cw]` — note the cache is stored in `[B, H, W]` order, so no transpose is needed) instead of the `.mat`; asserts the file exists (message names the build command) and has the expected shape/dtype. Works for crops and full frames alike.
+- `ids=None`: explicit list of sample ids to keep (train / val split); every id must exist in the split.
+- `out_dtype='float32'`: dtype of the returned `img` (`'float16'` for the detector: 0.55 GB per frame through the workers instead of 1.1 GB).
+- `band_range=(400., 800.)`: step 0 (§5.1).
+- `filter_bank_tensors()` → `(R [n_bands, N] float32 — L1-normalised when filter_norm='l1', channel_mean [N], channel_std [N], selected_voltages [N])` computed from the aligned matrix and the band statistics regardless of the instance's own `use_filter` / `norm` (the detector instance itself runs with `use_filter=False, norm='p99'`, so the standardisation is applied after the projection inside `FilterBank`).
+- Detector usage: `HyperCOD_data(data_path, split, ids=train_ids, use_filter=False, norm='p99', crop_size=0, cache_dir=..., out_dtype='float16', filter_select='all', filter_norm='l1')` + `det_collate_fn`.
 - Val split file: `data_loader/splits/det_val_ids.json` = 28 ids drawn once with `random.Random(0).sample(sorted train ids, 28)`, committed; `make_det_splits(data_path)` writes it if missing.
 
 ### 5.5 `models/filter_bank.py`
 ```python
 class FilterBank(nn.Module):
     def __init__(self, R, channel_mean, channel_std, weight_vector=True, init_logits=None)
-    def forward(self, x_fp16 [B, n_bands, H, W], scale [B]) -> y [B, N, H, W]   # fp16 under autocast
+    def forward(self, x_fp16 [B, n_bands, H, W]) -> y [B, N, H, W]   # x already p99-scaled by the loader; fp16 under autocast
     @property weights -> w = N * softmax(theta) [N]            (ones when weight_vector=False)
     def entropy(self) -> scalar penalty term  H(softmax theta) / log N  (in [0, 1])
     def ranking(self) -> indices sorted by w descending
 ```
-- Buffers: `R [n_bands, N]`, `mean [N]`, `std [N]` (float32); the projection runs as `torch.einsum('bn,bchw->bnhw', R.T, x / scale.view(B,1,1,1))` in autocast (fp16 inputs, fp32 accumulation), then `(y − mean) / std`, then `y * w.view(1, N, 1, 1)`.
+- Buffers: `R [n_bands, N]`, `mean [N]`, `std [N]` (float32); the projection runs as `torch.einsum('bn,bchw->bnhw', R.T, x)` in autocast (fp16 inputs, fp32 accumulation), then `(y − mean) / std`, then `y * w.view(1, N, 1, 1)`.
 - Test: equals the dataloader's `use_filter=True, norm='p99z'` output on the same crop (rtol 1e-2 in fp16).
 
 ### 5.6 `models/ec_yolo.py`
 - `load_pretrained_yolo(weights='yolo26s.pt')` → the ultralytics `DetectionModel` (downloads to `weights/pretrained/` if missing).
 - `replace_first_conv(model, n_channels)`: new `Conv2d(n_channels, 32, 3, 2, 1, bias=False)`, weight = pretrained RGB kernel tiled to `n_channels` (`repeat(1, ceil(N/3), 1, 1)[:, :N]`) × `3/N`; replaces `model.model[0].conv`.
-- `build_ec_yolo(args, frames_dataset)` → `nn.Module` `ECYolo(filter_bank, yolo)` with `forward(img, scale)` = `yolo(filter_bank(img, scale))` and `loss(batch)` = `yolo.loss({**batch, 'img': filter_bank(batch['img'], batch['scale'])})` + `λ_H · filter_bank.entropy()` (returned as an extra item `gate_entropy`). `model.args = get_cfg()` set for the loss gains. Session B: `weight_vector=False`.
+- `build_ec_yolo(args, dataset)` → `nn.Module` `ECYolo(filter_bank, yolo, stride=32)` with `forward(img)` = `yolo(filter_bank(pad_to_stride(img)))` and `loss(batch)` = `yolo.loss({**batch, 'img': filter_bank(pad_to_stride(batch['img']))})` + `λ_H · filter_bank.entropy()` (returned as an extra item `gate_entropy`); `pad_to_stride` zero-pads bottom/right to multiples of 32 (1680×1240 → 1696×1248) and the normalised `bboxes` are rescaled by `(W/Wp, H/Hp)` accordingly. `model.args = get_cfg()` set for the loss gains. Session B: `weight_vector=False`.
 - `select_top_k(filter_bank, k=10)` → indices, voltages, weights (also written as `gate_ranking.csv`: rank, voltage, weight, index).
 - `slice_to_channels(ecyolo, idx)` → new `ECYolo` with `R[:, idx]`, `mean/std[idx]`, first conv `W[:, idx] * w[idx]`, no weight vector; test: identical detector output on a random input before/after slicing when the dropped channels have `w = 0`.
 - `decode_predictions(out, conf_thres, iou_thres, max_det)` → per image `[M, 6]` xyxy, conf, cls via `ultralytics.utils.ops.non_max_suppression`.
@@ -128,11 +126,13 @@ class FilterBank(nn.Module):
 ## 6. Data flow (session A, train)
 
 ```
-cache_fp16/<split>/<id>.npy  ──np.load──> img fp16 [133, 1680, 1240] ──pad──> [133, 1696, 1248] ──flip──┐
-GT png ──boxes_from_mask──> [K,4] xyxy ──pad/flip──> boxes ──> batch_idx / cls / bboxes (norm xywh)     │
-                                                                                                        ▼ GPU
-FilterBank: y = w ⊙ ((Rᵀ(img/scale) − m)/s)  ──> [B, 344, 1696, 1248] fp16 ──> YOLO26s (first conv 344→32) ──> model.loss
-                                                                                     └── + λ_H · entropy(w)
+HyperCOD_data(use_filter=False, norm='p99', crop_size=0, cache_dir, out_dtype='float16')
+  cache_fp16/<split>/<id>.npy ──> img fp16 [133, 1680, 1240] (÷ p99 scale) ; GT png ──> mask [1, H, W]
+det_collate_fn: boxes_from_mask ──> batch_idx / cls / bboxes (norm xywh), img [B, 133, 1680, 1240]
+                                                                                        ▼ GPU (train_one_epoch)
+random h/v flips of img + bboxes ──> pad_to_stride ──> [B, 133, 1696, 1248]
+FilterBank: y = w ⊙ ((Rᵀ img − m)/s)  ──> [B, 344, 1696, 1248] fp16 ──> YOLO26s (first conv 344→32) ──> model.loss
+                                                                              └── + λ_H · entropy(w)
 ```
 
 ## 7. Training procedure
@@ -151,7 +151,7 @@ Asserts with f-string messages (project style): cache file missing → message w
 - Loader step 0: `band_range=(400, 800)` → `n_bands == 133`, `in_channels == 133` raw, `R.shape == (133, N)`, no zero rows; windowed p99 CSV built and used; `(400, 1000)` reproduces the current behaviour (existing tests updated for the new default where they hard-code 200/133).
 - `cube_cache`: build on the fixture (2 train + 1 test cubes) → files exist, `np.load` shape `(133, 48, 40)` fp16, values equal the h5 cube (within fp16), skip-if-exists honoured, p99 CSV rows written.
 - `boxes_from_mask`: single 6×6 object → one box `[20, 10, 26, 16]`; two objects → two boxes; a 5-px speck dropped; empty mask → `[0, 4]`. `flip_boxes` round-trips.
-- `HyperCOD_frames`: padded shape `(133, 64, 64)` for the 48×40 fixture with `pad_to=32`, boxes inside the padded frame, `scale` equals the loader's, flips move boxes consistently (checked against a flipped mask), `det_collate_fn` produces the loss keys with the right shapes and normalisation.
+- `HyperCOD_data` additions: `cache_dir` returns the same values as the `.mat` path (within fp16) for crops and full frames and asserts on a missing/mis-shaped cache file; `ids` restricts the sample list and rejects unknown ids; `out_dtype='float16'` returns fp16; `filter_bank_tensors()` matches `sensor_R_matrix` / `channel_mean` / `channel_std` of an equivalent `use_filter=True, norm='p99z'` instance. `det_collate_fn` produces the loss keys with the right shapes and normalisation from the fixture masks; GPU-side `pad_to_stride` gives `(133, 64, 64)` for the 48×40 fixture and rescales the normalised boxes; flips move boxes consistently (checked against a flipped mask).
 - `FilterBank` ≡ dataloader (`use_filter=True, norm='p99z', filter_norm='l1'`) on the same window; `weights` sum to N; `entropy() ∈ [0, 1]`; `ranking()` sorted.
 - `replace_first_conv`: shape `(32, N, 3, 3)`, kernel tiling + `3/N` scaling; `slice_to_channels` preserves outputs when dropped channels have zero weight; `select_top_k` returns k unique indices and writes the CSV.
 - `train_eval_det`: recall/AP50/matched-IoU on hand-made predictions (perfect → 1/1/1; none → 0/0/nan; half matched → 0.5); one `train_one_epoch` + `evaluate` step on a tiny `yolo26n.yaml` (`ch=133, nc=1`, random init) with the fixture frames on CPU — runs end to end, loss finite, checkpoint dict has the required keys.
