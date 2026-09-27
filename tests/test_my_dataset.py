@@ -1,4 +1,5 @@
 import argparse
+import os
 import pickle
 import random
 import numpy as np
@@ -14,6 +15,7 @@ def make(root, **kw):
     kw.setdefault('split', 'train')
     kw.setdefault('crop_size', 16)
     kw.setdefault('norm', 'none')
+    kw.setdefault('filter_norm', 'none')
     kw.setdefault('seed', 0)
     return HyperCOD_data(data_path=str(root), **kw)
 
@@ -78,6 +80,8 @@ def test_init_asserts(synthetic_root, tmp_path):
         make(root, crop_size=W + 1)
     with pytest.raises(AssertionError, match="norm"):
         make(root, norm='minmax')
+    with pytest.raises(AssertionError, match="filter_norm"):
+        make(root, filter_norm='l2')
     with pytest.raises(AssertionError, match="does not exist"):
         make(root, filter_path=str(tmp_path / 'missing.mat'))
     with pytest.raises(AssertionError, match="does not exist"):
@@ -213,7 +217,8 @@ def test_add_dataset_args_defaults():
     assert args.data_path == '/data2/chaoyi/HyperCOD/Raw data'
     assert args.filter_path is None and args.use_filter is False
     assert (args.num_filters, args.filter_select, args.filter_voltages) == (30, 'uniform', None)
-    assert (args.crop_size, args.obj_crop_prob, args.norm) == (512, 0.5, 'p99')
+    assert (args.crop_size, args.obj_crop_prob, args.norm) == (512, 0.5, 'p99z')
+    assert (args.filter_norm, args.stats_path) == ('l1', None)
 
 
 def test_build_dataset_from_args(synthetic_root):
@@ -275,3 +280,88 @@ def test_init_asserts_non_numeric_mat_name(synthetic_root):
     (root / 'train' / 'hyperspectral' / 'notes.mat').write_bytes(b'')
     with pytest.raises(AssertionError, match="non-numeric"):
         make(root)
+
+
+# ---- normalisation layer 2: L1-normalised filter columns ----
+
+def test_filter_norm_l1_unit_columns(synthetic_root):
+    root, _, _ = synthetic_root
+    ds0 = make(root, num_filters=12, filter_norm='none')
+    ds1 = make(root, num_filters=12, filter_norm='l1')
+    np.testing.assert_allclose(np.abs(ds1.sensor_R_matrix).sum(axis=0), 1.0, rtol=1e-5)   # every column sums to 1 in |.|
+    np.testing.assert_allclose(ds1.filter_gain, ds0.filter_gain)                          # gain still reports the raw columns
+    assert (ds1.filter_gain > 1).all()
+    np.testing.assert_allclose(ds1.sensor_R_matrix, ds0.sensor_R_matrix / ds0.filter_gain, rtol=1e-5)
+    assert ds1.sensor_R_matrix.dtype == np.float32 and ds1.in_channels == 12
+
+
+def test_filter_norm_l1_output_bounded_by_band_values(synthetic_root):
+    root, _, _ = synthetic_root
+    img_r, _, _ = make(root, split='test', use_filter=False)[0]
+    img_f, _, _ = make(root, split='test', use_filter=True, filter_norm='l1')[0]
+    assert np.abs(img_f).max() <= img_r.max() + 1e-5      # each channel is a weighted average of bands
+    assert np.abs(img_f).max() > 0.1 * img_r.max()        # and not vanishing
+
+
+# ---- normalisation layer 3: per-channel standardisation from training band statistics ----
+
+def test_p99z_autobuilds_stats_and_standardizes_raw(synthetic_root):
+    root, _, _ = synthetic_root
+    stats_path = root / 'band_stats_train.npz'
+    assert not stats_path.exists()
+    ds = make(root, split='test', use_filter=False, norm='p99z')     # stats come from the train split
+    assert stats_path.exists() and ds.stats_path == str(stats_path)
+    st = np.load(stats_path)
+    assert st['mean'].shape == (N_BANDS,) and st['cov'].shape == (N_BANDS, N_BANDS)
+    assert int(st['n_pixels']) == 2 * H * W and int(st['n_samples']) == 2       # tiny fixture -> full frames
+    np.testing.assert_allclose(ds.channel_mean, st['mean'], rtol=1e-6)
+    np.testing.assert_allclose(ds.channel_std, np.sqrt(np.diag(st['cov'])), rtol=1e-6)
+    assert ds.scale is not None                                              # p99 scaling still applies underneath
+    img_z, _, _ = ds[0]
+    img_p, _, _ = make(root, split='test', use_filter=False, norm='p99')[0]
+    expected = (img_p - st['mean'][:, None, None]) / np.sqrt(np.diag(st['cov']))[:, None, None]
+    np.testing.assert_allclose(img_z, expected, rtol=1e-4, atol=1e-5)
+    assert img_z.dtype == np.float32 and img_z.flags['C_CONTIGUOUS']
+
+
+def test_p99z_train_pixels_are_standard(synthetic_root):
+    root, _, _ = synthetic_root
+    ds = make(root, use_filter=False, norm='p99z', crop_size=0)        # the same pixels the stats were built from
+    x = np.concatenate([ds[i][0].reshape(N_BANDS, -1) for i in range(len(ds))], axis=1)   # [200, 2*H*W]
+    np.testing.assert_allclose(x.mean(axis=1), 0.0, atol=1e-4)
+    np.testing.assert_allclose(x.std(axis=1), 1.0, rtol=1e-3)
+
+
+def test_p99z_filter_channels_use_projected_stats(synthetic_root):
+    root, _, _ = synthetic_root
+    kw = dict(use_filter=True, num_filters=12, filter_norm='l1')
+    ds_z = make(root, split='test', norm='p99z', **kw)
+    ds_p = make(root, split='test', norm='p99', **kw)
+    st = np.load(root / 'band_stats_train.npz')
+    R = ds_p.sensor_R_matrix.astype(np.float64)                             # [200, 12]
+    mean_y = R.T @ st['mean']                                               # [12]
+    std_y = np.sqrt(np.einsum('bn,bc,cn->n', R, st['cov'], R))              # [12]
+    np.testing.assert_allclose(ds_z.channel_mean, mean_y, rtol=1e-5)
+    np.testing.assert_allclose(ds_z.channel_std, std_y, rtol=1e-5)
+    img_z, _, _ = ds_z[0]
+    img_p, _, _ = ds_p[0]
+    np.testing.assert_allclose(img_z, (img_p - mean_y[:, None, None]) / std_y[:, None, None], rtol=1e-4, atol=1e-5)
+    # standardisation happens AFTER the projection, so pooled training pixels come out standard per channel
+    ds_tr = make(root, norm='p99z', crop_size=0, **kw)
+    y = np.concatenate([ds_tr[i][0].reshape(12, -1) for i in range(len(ds_tr))], axis=1)
+    np.testing.assert_allclose(y.mean(axis=1), 0.0, atol=1e-4)
+    np.testing.assert_allclose(y.std(axis=1), 1.0, rtol=1e-3)
+
+
+def test_p99z_reuses_existing_stats_file(synthetic_root):
+    root, _, _ = synthetic_root
+    make(root, norm='p99z')                                      # builds the file
+    stats_path = root / 'band_stats_train.npz'
+    mtime = os.path.getmtime(stats_path)
+    ds = make(root, norm='p99z', split='test')                   # must load, not rebuild
+    assert os.path.getmtime(stats_path) == mtime and ds.channel_mean is not None
+
+
+def test_no_channel_stats_without_p99z(synthetic_root):
+    root, _, _ = synthetic_root
+    assert make(root, norm='p99').channel_mean is None and make(root, norm='none').channel_std is None

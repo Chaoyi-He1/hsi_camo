@@ -32,7 +32,10 @@ A PyTorch `Dataset` for the HyperCOD hyperspectral camouflaged-object dataset th
 - **Layout:** keep the h5py `(B, W, H)` block, project with the filter in that layout, then swap only the last two axes to `(C, H, W)`. Never materialise `(H, W, B)`.
 - **Filter alignment:** linear `interp1d` onto the cube axis with `fill_value=0.0` outside 400–800 nm (bands 133–199 get zero response — the file defines nothing there; extrapolation would be wrong). **No per-column min–max normalisation** (unlike the previous project) because the columns are already peak-normalised and min–max would destroy the negative lobes.
 - **Channel selection:** candidates exclude the dead zone 0.25–0.31 V; `uniform` (default, `np.linspace` over candidate indices as in the previous code), `osp` (reuse the previous `osp()` for index selection only), `all`, `manual` (nearest voltage to each requested value). `num_filters` is used by `uniform` and `osp` only; `all` yields every candidate and `manual` yields one channel per requested voltage (`filter_voltages`, list of floats).
-- **Normalisation:** `--norm p99` (default) divides the cube by `intensity_p99 / 200` of that sample (from the CSV) so bright-pixel band values sit near 1; `--norm none` disables. The scale is a positive scalar, so applying it before or after the filter is identical.
+- **Normalisation — three layers, each fixing one thing (added 2026-09-26):**
+  1. *Per-scene exposure* (`--norm p99`): divide the cube by `intensity_p99 / 200` of that sample (from the CSV) so bright-pixel band values sit near 1; removes the ~40× scene-to-scene brightness spread. Positive scalar, so before/after the filter is identical.
+  2. *Filter gain artifact* (`--filter_norm l1`, default): divide every selected filter column by its L1 norm, so a channel is a weighted *average* of bands instead of a weighted sum. The file's peak normalisation made channels Σ|R| ≈ 19–65× larger than a band and 3.4× different between voltages — an artifact, not physics, since absolute responsivity was discarded. `filter_gain` still reports the un-normalised gains. `--filter_norm none` keeps the old behaviour.
+  3. *Per-channel standardisation* (`--norm p99z`, default): after layers 1–2 the per-band means still differ 4–31× within a scene (NIR vs. blue); a CNN wants ~zero-mean/unit-variance inputs. A one-time pass over the train split (one uniform 512² crop per cube, 73 M pixels, ~2.5 min with 8 workers; `data_loader/band_stats.py`, auto-run on first use, saved to `<data_path>/band_stats_train.npz` like the previous project's `data_range.npz`) stores the mean `μ [200]` and covariance `Σ [200×200]` of the p99-normalised bands. Channel statistics follow by linearity for **any** voltage selection — `mean_y = Rᵀμ`, `std_y = sqrt(diag(RᵀΣR))` — so the file never needs recomputing. Standardisation is applied **after** the projection, because the real detector integrates over wavelength before readout and cannot subtract per-band means first. Raw mode uses `μ`, `sqrt(diag Σ)`. Result on real data: filter-mode crops span ≈ [−1.3, 1.6], raw-mode ≈ [−1.7, 4.6] (was [−66, 94] vs [0, 2.7]).
 - **Source of truth:** `.mat` files. `HCODh5/` (float16 Blosc cache) is not used: 22 ids missing, `242.h5` truncated, `22.h5` has 400 bands.
 
 ## Components
@@ -43,14 +46,17 @@ A PyTorch `Dataset` for the HyperCOD hyperspectral camouflaged-object dataset th
 class HyperCOD_data(Dataset.Dataset):
     def __init__(self, data_path, split='train', use_filter=True, filter_path=None,
                  num_filters=30, filter_select='uniform', filter_voltages=None,
-                 crop_size=512, obj_crop_prob=0.5, norm='p99', seed=None)
+                 crop_size=512, obj_crop_prob=0.5, norm='p99z', filter_norm='l1',
+                 stats_path=None, seed=None)
 ```
 
 `seed` (optional int) makes crop sampling reproducible: in-process the dataset uses `random.Random(seed)`; inside a DataLoader worker a fresh stream is derived from `(seed, worker seed)` so workers and epochs still get different crops. `None` (training default) uses the `random` module, which PyTorch re-seeds per worker and per epoch. The `random` module is never stored on the instance (a module is unpicklable, which would break `spawn`/`forkserver` workers); it is resolved through the `rng` property.
 
-Attributes after init: `img_name` (list of id strings), `wavelens [200]`, `sensor_wavelens [401]`, `voltages [351]`, `sensor_R_matrix [200, N]`, `filter_gain [N]` (= `|R|.sum(0)`, the per-channel gain), `selected_indices`, `selected_voltages`, `valid_band_mask [200]` (≤ 800 nm), `scale` (dict id → float, or None), `in_channels` (N or 200), `H, W = 1680, 1240`.
+Attributes after init: `img_name` (list of id strings), `wavelens [200]`, `sensor_wavelens [401]`, `voltages [351]`, `sensor_R_matrix [200, N]` (L1-normalised columns when `filter_norm='l1'`), `filter_gain [N]` (= `|R|.sum(0)` of the peak-normalised columns), `selected_indices`, `selected_voltages`, `valid_band_mask [200]` (≤ 800 nm), `scale` (dict id → float, or None), `stats_path`, `channel_mean / channel_std [C]` (float32, `norm='p99z'` only, else None), `in_channels` (N or 200), `H, W = 1680, 1240`.
 
-Output scale: with `norm='p99'` bright-pixel *band* values sit near 1, so a filter channel (a weighted sum over ~133 bands) is `filter_gain` ≈ 20–65× larger than a raw band on the real EC filter, and the gain differs ~3× between voltages. The dataloader deliberately does not rescale the filter outputs (the columns are already peak-normalised, and the training script may prefer `BatchNorm2d(in_channels, affine=False)` or a fixed `1/filter_gain`); the training script must choose one before comparing `use_filter` on/off runs. An opt-in per-column L1 normalisation is a possible follow-up.
+Output scale: see Decisions → Normalisation. With the defaults (`norm='p99z'`, `filter_norm='l1'`) raw and filter inputs are both standardised per channel and directly comparable; `norm='p99'` with `filter_norm='none'` reproduces the earlier behaviour (filter channels ≈ 20–65× larger than bands).
+
+`load_channel_stats()` — for `norm='p99z'`: builds `band_stats_train.npz` via `band_stats.compute_band_stats` if missing (full frames instead of 512² crops when the cubes are smaller, as in the test fixture), then derives `channel_mean/std` from `μ, Σ` (raw: `μ, sqrt(diag Σ)`; filter: `Rᵀμ, sqrt(diag RᵀΣR)`), asserting no zero-variance channel.
 
 Methods:
 - `load_sensor_response()` — load `.mat`, validate keys/shapes, align to `wavelens` (see Decisions), select channels.
@@ -111,6 +117,8 @@ Tests:
 Plus the `__main__` smoke test on a real sample (manual).
 
 Regression tests added by the reviews: `osp` stops on rank-deficient input without duplicates and the shortfall warning fires; `in_dead_zone` boundaries (0.25, 0.31, float-noise 0.29000000000000004); `manual` rejects duplicate voltages; the unseeded dataset is picklable; a seeded dataset is deterministic in-process yet varies crops across epochs with `num_workers=2`; `filter_gain` equals `|R|.sum(0)`; `read_cube_block` asserts on a clipped window; non-numeric `.mat` names are rejected. Total: 46 tests.
+
+Normalisation layers (2026-09-26, +10 tests → 56): L1 columns have unit L1 norm and `filter_gain` is unchanged; L1 filter output is bounded by the band values; `p99z` auto-builds the stats file from the train split (full frames on the fixture) and reproduces `(x − μ)/σ` exactly; pooled training pixels come out mean 0 / std 1 per channel in raw mode **and** through the filter (proving the post-projection formula); an existing stats file is reused; `compute_band_stats` matches a direct `np.cov` computation and works with crops + workers; `load_band_stats` validates shapes.
 
 ## Out of scope
 

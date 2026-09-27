@@ -10,6 +10,7 @@ from PIL import Image
 
 from data_loader.ec_filter import (N_BANDS, WAVELENS_200, load_ec_filter, align_filter_to_wavelens,
                                    select_filter_channels)
+from data_loader.band_stats import STATS_CROP_SIZE, default_stats_path, load_band_stats, compute_band_stats
 
 GT_THRESHOLD = 127            # GT pngs are JPEG-compressed with 3 identical channels; foreground = channel 0 > 127
 HYPERCUBE_KEY = 'hypercube'   # variable name inside the MATLAB v7.3 (HDF5) .mat cubes
@@ -18,7 +19,7 @@ HYPERCUBE_KEY = 'hypercube'   # variable name inside the MATLAB v7.3 (HDF5) .mat
 class HyperCOD_data(Dataset.Dataset):
     def __init__(self, data_path, split='train', use_filter=True, filter_path=None, num_filters=30,
                  filter_select='uniform', filter_voltages=None, crop_size=512, obj_crop_prob=0.5,
-                 norm='p99', seed=None):
+                 norm='p99z', filter_norm='l1', stats_path=None, seed=None):
         super(HyperCOD_data, self).__init__()
         self.data_path = data_path
         self.split = split  # 'train' or 'test'
@@ -29,7 +30,13 @@ class HyperCOD_data(Dataset.Dataset):
         self.filter_voltages = filter_voltages
         self.crop_size = crop_size  # training crop at native resolution, 0 means full frame
         self.obj_crop_prob = obj_crop_prob  # probability that a training crop is placed to contain the object
-        self.norm = norm  # 'none' or 'p99'
+        # normalisation layers: 'p99' = per-scene scalar (cube / (intensity_p99 / 200)),
+        # 'p99z' = p99 followed by per-channel standardisation with training band statistics
+        self.norm = norm  # 'none', 'p99' or 'p99z'
+        # 'l1' divides every selected filter column by its L1 norm, so a channel is a weighted average of bands
+        # (same scale as a raw band) instead of a weighted sum ~20-65x larger; 'none' keeps the peak-normalised columns
+        self.filter_norm = filter_norm
+        self.stats_path = stats_path if stats_path is not None else default_stats_path(data_path)
         self.seed = seed
         # never keep the random module itself on the instance: a module is not picklable, which breaks
         # DataLoader workers with the spawn/forkserver start methods; see the rng property
@@ -37,7 +44,8 @@ class HyperCOD_data(Dataset.Dataset):
         self._rng_key = None
 
         assert self.split in ['train', 'test'], "split must be 'train' or 'test'"
-        assert self.norm in ['none', 'p99'], "norm must be 'none' or 'p99'"
+        assert self.norm in ['none', 'p99', 'p99z'], "norm must be 'none', 'p99' or 'p99z'"
+        assert self.filter_norm in ['none', 'l1'], "filter_norm must be 'none' or 'l1'"
         assert os.path.exists(self.data_path), f"Data path {self.data_path} does not exist"
         assert os.path.exists(self.filter_path), f"Filter file {self.filter_path} does not exist"
 
@@ -68,9 +76,12 @@ class HyperCOD_data(Dataset.Dataset):
         print(f"Loading sensor response from {self.filter_path}...")
         self.load_sensor_response()
 
-        self.scale = self.load_intensity_scale() if self.norm == 'p99' else None
+        self.scale = self.load_intensity_scale() if self.norm in ['p99', 'p99z'] else None
 
         self.in_channels = self.sensor_R_matrix.shape[1] if self.use_filter else N_BANDS
+
+        # per-channel mean/std [C] for norm='p99z' (None otherwise), applied after the filter projection
+        self.channel_mean, self.channel_std = self.load_channel_stats() if self.norm == 'p99z' else (None, None)
 
     def __len__(self):
         return len(self.img_name)
@@ -109,9 +120,14 @@ class HyperCOD_data(Dataset.Dataset):
         self.sensor_R_matrix = R_aligned[:, self.selected_indices].astype(np.float32)  # [C, N]
         # per-channel gain: with norm='p99' band values are ~1 at bright pixels, so a filter channel is
         # ~filter_gain times larger (about 20-65 on the real EC filter); the training script can divide by it
-        self.filter_gain = np.abs(self.sensor_R_matrix).sum(axis=0)  # [N]
+        self.filter_gain = np.abs(self.sensor_R_matrix).sum(axis=0)  # [N], gain of the peak-normalised columns
+        if self.filter_norm == 'l1':
+            # unit L1 norm per column: each channel becomes a weighted average of the bands, so filter-mode
+            # inputs sit on the same scale as raw bands and the 3x gain difference between voltages (an
+            # artifact of the file's peak normalisation, not physics) disappears
+            self.sensor_R_matrix = (self.sensor_R_matrix / self.filter_gain).astype(np.float32)  # [C, N]
         print(f"Sensor response aligned: {self.sensor_R_matrix.shape[0]} bands x {self.sensor_R_matrix.shape[1]} channels, "
-              f"{int(self.valid_band_mask.sum())} bands inside the sensor range, "
+              f"{int(self.valid_band_mask.sum())} bands inside the sensor range, filter_norm={self.filter_norm}, "
               f"voltages {np.round(self.selected_voltages, 2).tolist()}")
 
     def load_intensity_scale(self):
@@ -131,6 +147,31 @@ class HyperCOD_data(Dataset.Dataset):
             assert name in scale, f"sample {name} missing from {csv_path}"
             assert scale[name] > 0, f"non-positive intensity p99 for sample {name}"
         return scale
+
+    def load_channel_stats(self):
+        '''
+        Per-channel mean/std for norm='p99z' from the training band statistics (mean [200], cov [200, 200] of
+        the p99-normalised bands; built from the train split on first use, see band_stats.compute_band_stats).
+        Standardisation is applied AFTER the filter projection - a real detector integrates over wavelength
+        before readout, so per-band means cannot be subtracted first - and the channel statistics follow from
+        the band statistics by linearity: mean_y = R^T mu, var_y = diag(R^T Sigma R).
+        Returns (channel_mean [C], channel_std [C]) as float32, C = N filter channels or 200 raw bands.
+        '''
+        if not os.path.exists(self.stats_path):
+            crop_size = STATS_CROP_SIZE if min(self.H, self.W) >= STATS_CROP_SIZE else 0  # tiny cubes: full frames
+            num_workers = 0 if len(self) < 8 else min(8, os.cpu_count() or 1)
+            compute_band_stats(self.data_path, self.stats_path, crop_size=crop_size, num_workers=num_workers,
+                               filter_path=self.filter_path)
+        mu, cov = load_band_stats(self.stats_path)  # [200], [200, 200]
+        if self.use_filter:
+            R = self.sensor_R_matrix.astype(np.float64)  # [200, N]
+            mean = R.T @ mu  # [N]
+            var = np.einsum('bn,bc,cn->n', R, cov, R)  # [N]
+        else:
+            mean, var = mu, np.diag(cov)  # [200]
+        std = np.sqrt(np.maximum(var, 0.0))
+        assert (std > 0).all(), f"zero-variance channels in {self.stats_path}: {np.where(std == 0)[0].tolist()}"
+        return mean.astype(np.float32), std.astype(np.float32)
 
     def load_gt(self, name):
         '''GT pngs are JPEG-compressed with 3 identical channels; foreground = channel 0 > 127. Returns bool [H, W].'''
@@ -190,7 +231,7 @@ class HyperCOD_data(Dataset.Dataset):
         h0, w0, ch, cw = self.crop_window(gt)
 
         blk = self.read_cube_block(name, h0, w0, ch, cw)  # [B, cw, ch] float32
-        if self.norm == 'p99':
+        if self.norm in ['p99', 'p99z']:
             # positive per-sample scalar, so scaling before or after the filter is identical
             blk /= np.float32(self.scale[name])
 
@@ -202,6 +243,9 @@ class HyperCOD_data(Dataset.Dataset):
 
         # only the last two axes are swapped: [C, cw, ch] -> [C, ch, cw]; never build [H, W, B] (6 s per crop)
         img = np.ascontiguousarray(img.transpose(0, 2, 1), dtype=np.float32)  # [C, ch, cw]
+        if self.norm == 'p99z':
+            # per-channel standardisation after the (simulated) readout
+            img = (img - self.channel_mean[:, None, None]) / self.channel_std[:, None, None]  # [C, ch, cw]
         gt = gt[h0:h0 + ch, w0:w0 + cw].astype(np.float32)[None]  # [1, ch, cw]
         return img, gt, name
 
@@ -232,9 +276,15 @@ def add_dataset_args(parser):
                         help='training crop size at native resolution, 0 means full frame')
     parser.add_argument('--obj_crop_prob', type=float, default=0.5,
                         help='probability that a training crop is placed to contain the object')
-    parser.add_argument('--norm', type=str, default='p99', choices=['none', 'p99'],
-                        help='per-sample scaling by intensity p99 / 200 from intensity_p99_summary.csv'
-                             '; note filter channels are ~20-65x larger than band values (see HyperCOD_data.filter_gain)')
+    parser.add_argument('--norm', type=str, default='p99z', choices=['none', 'p99', 'p99z'],
+                        help='p99: per-sample scaling by intensity p99 / 200 from intensity_p99_summary.csv; '
+                             'p99z: p99 followed by per-channel standardisation with training band statistics '
+                             '(band_stats_train.npz, built on first use)')
+    parser.add_argument('--filter_norm', type=str, default='l1', choices=['none', 'l1'],
+                        help='l1: divide each filter column by its L1 norm so channels are weighted averages of bands; '
+                             'none: keep the peak-normalised columns (channels ~20-65x larger, see HyperCOD_data.filter_gain)')
+    parser.add_argument('--stats_path', type=str, default=None,
+                        help='training band statistics .npz for norm p99z, default <data_path>/band_stats_train.npz')
     return parser
 
 
@@ -242,7 +292,8 @@ def build_dataset(args, split):
     return HyperCOD_data(data_path=args.data_path, split=split, use_filter=args.use_filter,
                          filter_path=args.filter_path, num_filters=args.num_filters,
                          filter_select=args.filter_select, filter_voltages=args.filter_voltages,
-                         crop_size=args.crop_size, obj_crop_prob=args.obj_crop_prob, norm=args.norm)
+                         crop_size=args.crop_size, obj_crop_prob=args.obj_crop_prob, norm=args.norm,
+                         filter_norm=args.filter_norm, stats_path=args.stats_path)
 
 
 if __name__ == '__main__':
