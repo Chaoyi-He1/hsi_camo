@@ -101,8 +101,12 @@ class ECYolo(nn.Module):
     def pad_to_stride(self, img):
         H, W = img.shape[-2:]
         Hp, Wp = math.ceil(H / self.stride) * self.stride, math.ceil(W / self.stride) * self.stride
-        # .float(): the dataset may hand out fp16 frames (out_dtype='float16'); the model runs in fp32
-        return F.pad(img.float(), (0, Wp - W, 0, Hp - H)), (H, W, Hp, Wp)             # zero-pad bottom/right
+        # the dataset may hand out fp16 frames (out_dtype='float16') and the model runs in fp32, so upcast --
+        # except under autocast, where FilterBank's einsum casts straight back down and the fp32 copy of a
+        # [B, 133, 1696, 1248] batch (2.25 GB) would be pure peak-memory overhead.
+        if not torch.is_autocast_enabled(img.device.type):
+            img = img.float()
+        return F.pad(img, (0, Wp - W, 0, Hp - H)), (H, W, Hp, Wp)                     # zero-pad bottom/right
 
     def attach_criterion(self):
         crit = self.yolo.init_criterion()

@@ -249,9 +249,9 @@ def main(args):
                    min_area=args.min_area, roi_conf=args.roi_conf, roi_topk=args.roi_topk, amp=scaler is not None)
     results_path = os.path.join(args.output_dir, f'results_{args.name}.txt')
     if args.eval:
-        val = evaluate(model_without_ddp, loader_val, device, logger=logger, epoch=args.start_epoch, tag='val', **eval_kw)
-        test = evaluate(model_without_ddp, loader_test, device, logger=logger, epoch=args.start_epoch, tag='test', **eval_kw)
-        if utils.is_main_process():
+        if utils.is_main_process():                              # loader_val/test are not sharded: rank 0 only
+            val = evaluate(model_without_ddp, loader_val, device, logger=logger, epoch=args.start_epoch, tag='val', **eval_kw)
+            test = evaluate(model_without_ddp, loader_test, device, logger=logger, epoch=args.start_epoch, tag='test', **eval_kw)
             with open(results_path, 'a') as f:
                 f.write(json.dumps({'eval': True, 'resume': args.resume, 'val': val, 'test': test}) + '\n')
         logger.finish(); return
@@ -263,13 +263,15 @@ def main(args):
         train_stats = train_one_epoch(model, loader_train, optimizer, device, epoch, max_norm=args.max_norm, scaler=scaler,
                                       accumulate=args.accumulate, logger=logger, flip=not args.no_flip)
         scheduler.step()
-        val = evaluate(model_without_ddp, loader_val, device, logger=logger, epoch=epoch, tag='val', **eval_kw)
-        if args.session == 'A' and utils.is_main_process():
-            w = model_without_ddp.filter_bank.weights.detach().cpu().numpy(); volts = model_without_ddp.selected_voltages
-            logger.histogram('gate/weights', w, epoch); logger.scalars({'gate/max': w.max(), 'gate/entropy': float(model_without_ddp.filter_bank.entropy().detach())}, epoch)
-            order = np.argsort(-w)[:20]; logger.table('gate/top20', ['rank', 'voltage', 'weight'], [[r + 1, float(volts[i]), float(w[i])] for r, i in enumerate(order)], epoch)
-        score = select_score(val)
+        # loader_val is not sharded, so every rank would evaluate the whole val set and only rank 0 would use
+        # the numbers; the other ranks simply wait at the next epoch's first all-reduce.
         if utils.is_main_process():
+            val = evaluate(model_without_ddp, loader_val, device, logger=logger, epoch=epoch, tag='val', **eval_kw)
+            if args.session == 'A':
+                w = model_without_ddp.filter_bank.weights.detach().cpu().numpy(); volts = model_without_ddp.selected_voltages
+                logger.histogram('gate/weights', w, epoch); logger.scalars({'gate/max': w.max(), 'gate/entropy': float(model_without_ddp.filter_bank.entropy().detach())}, epoch)
+                order = np.argsort(-w)[:20]; logger.table('gate/top20', ['rank', 'voltage', 'weight'], [[r + 1, float(volts[i]), float(w[i])] for r, i in enumerate(order)], epoch)
+            score = select_score(val)
             if score > best:                                     # before model_{epoch}, so it stores the best including this epoch
                 best = score; save_checkpoint(os.path.join(args.output_dir, 'model_best'), model_without_ddp, optimizer, scaler, scheduler, epoch, args, best)
             if (epoch + 1) % args.save_every == 0 or epoch + 1 == args.epochs:

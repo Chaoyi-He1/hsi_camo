@@ -107,6 +107,16 @@ def test_ecyolo_pads_and_computes_loss_on_cpu(synthetic_root):
     model.end_epoch()                                                           # criterion.update() must not fail
 
 
+def test_pad_to_stride_skips_the_fp32_copy_under_autocast():
+    model = _tiny(4, contain_weight=0.0)
+    x = torch.zeros(1, 133, H, W, dtype=torch.float16)
+    out, shape = model.pad_to_stride(x)
+    assert out.dtype == torch.float32 and shape == (H, W, 64, 64)      # autocast off: the model runs in fp32
+    with torch.autocast('cpu', dtype=torch.bfloat16):
+        out_low, shape_low = model.pad_to_stride(x)
+    assert out_low.dtype == torch.float16 and shape_low == shape       # the einsum casts down anyway
+
+
 def test_select_top_k_and_slice_preserve_outputs(tmp_path):
     logits = np.array([5.0, 4.0, 3.0, -30.0, -30.0, -30.0], np.float32)          # channels 3-5 have ~zero weight
     model = _tiny(6, logits=logits).eval()
