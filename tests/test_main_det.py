@@ -1,11 +1,10 @@
 import json
 import os
-import sys
-import types
 import torch
 import pytest
 
 import main_det
+from util.distributed_util import Custom_DistributedSampler
 from data_loader.cube_cache import build_cube_cache, default_cache_dir
 
 
@@ -18,6 +17,16 @@ def _args(root, tmp_path, **kw):
         argv += [k] + ([] if v is None else [str(v)])
     parser = main_det.get_args_parser()
     return parser.parse_args(argv)
+
+
+def test_train_sampler_is_one_pass_per_epoch():
+    ds = list(range(250))
+    assert isinstance(main_det.build_train_sampler(ds, distributed=False), torch.utils.data.RandomSampler)
+    s = main_det.build_train_sampler(ds, distributed=True, num_replicas=2, rank=0)
+    idx = list(iter(s))
+    assert len(s) == 125 and len(idx) == 125 and len(set(idx)) == 125        # one pass over this rank's half
+    assert len(main_det.build_train_sampler(list(range(251)), True, num_replicas=2, rank=1)) == 126   # ceil(N/world)
+    assert len(Custom_DistributedSampler(ds, num_replicas=2, rank=0)) == 125 * 20   # the default this guards against
 
 
 def test_sessions_a_then_b_and_eval(synthetic_root, tmp_path, monkeypatch):

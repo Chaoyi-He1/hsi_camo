@@ -128,6 +128,20 @@ def build_datasets(args):
             HyperCOD_data(split='test', ids=test_ids, **kw))
 
 
+def build_train_sampler(dataset, distributed, num_replicas=None, rank=None):
+    '''
+    Training sampler, one pass over the data per epoch. Custom_DistributedSampler defaults to extend_factor=20
+    (20 concatenated permutations per "epoch"), but the cosine LR, the E2E loss gain decay and the per-epoch
+    validation/checkpoint cadence all assume a single pass, so DDP pins it to 1 and the length is checked.
+    '''
+    if not distributed:
+        return torch.utils.data.RandomSampler(dataset)
+    sampler = Custom_DistributedSampler(dataset, num_replicas=num_replicas, rank=rank, shuffle=True, extend_factor=1)
+    expect = math.ceil(len(dataset) / sampler.num_replicas)
+    assert len(sampler) == expect, f"DDP sampler yields {len(sampler)} indices per rank, expected one pass ({expect})"
+    return sampler
+
+
 def read_ranking(csv_path, k):
     with open(csv_path, newline='') as f:
         rows = sorted(csv.DictReader(f), key=lambda r: int(r['rank']))
@@ -177,10 +191,7 @@ def main(args):
 
     dataset_train, dataset_val, dataset_test = build_datasets(args)
     print(f"train {len(dataset_train)} / val {len(dataset_val)} / test {len(dataset_test)} frames, {dataset_train.n_bands} bands")
-    if args.distributed:
-        sampler_train = Custom_DistributedSampler(dataset_train, shuffle=True)
-    else:
-        sampler_train = torch.utils.data.RandomSampler(dataset_train)
+    sampler_train = build_train_sampler(dataset_train, args.distributed)
     collate = partial(det_collate_fn, min_area=args.min_area)
     mk = lambda ds, sampler, bs, shuffle: torch.utils.data.DataLoader(ds, batch_size=bs, sampler=sampler, shuffle=shuffle, num_workers=args.num_workers,
                                                                      collate_fn=collate, pin_memory=device.type == 'cuda', drop_last=False)
