@@ -10,7 +10,13 @@ iou_thres: 0.6                # NMS IoU
 max_det: 300
 roi_margin: 1.5               # Stage-2 crop = box grown 1.5x about its centre ...
 roi_min: 256                  # ... and at least 256 px per side
-roi_conf: 0.25                # ROI operating point: confidence floor for the boxes handed to Stage 2 ...
+roi_conf: 0.02                # ROI operating point: confidence floor for the boxes handed to Stage 2 (calibrated on det_A
+                              # model_99 val: 0.25 -> 35 % of objects inside an ROI at 0.5 boxes/frame, 0.02 -> 58 % at 1.5/frame) ...
 roi_topk: 5                   # ... and how many of them per frame. main_det_rois exports exactly this subset,
                               # and evaluate reports the *_op metrics on it (main_det_rois --max-rois overrides roi_topk)
 min_area: 100                 # GT mask components below this many pixels are JPEG specks, not objects (tests use 10)
+select_keys: [coverage_recall99_roi_op, recall50_op]
+                              # val keys that rank checkpoints (model_best), primary first. Deviation from the spec's
+                              # (coverage_recall99_raw, tightness): that pair is computed over all ~300 candidates at
+                              # conf 0.001 and picked epoch 0 in det_A run #6 (recall50 0). The _op pair scores the
+                              # boxes Stage 2 receives (conf >= roi_conf, top roi_topk).

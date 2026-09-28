@@ -148,7 +148,18 @@ class BoxMetrics(object):
                 **self._object_stats(self.records_op, '_op')}
 
 
-def select_score(summary):
-    '''Checkpoint ranking key: coverage recall @ 0.99 (raw box) first, mean tightness as tie-breaker (nan -> 0).'''
-    t = summary['tightness']
-    return (summary['coverage_recall99_raw'], 0.0 if (t is None or math.isnan(t)) else t)
+SELECT_KEYS_SPEC = ('coverage_recall99_raw', 'tightness')
+
+
+def select_score(summary, keys=SELECT_KEYS_SPEC):
+    '''
+    Checkpoint ranking key: the summary values of `keys` in order (first = primary, the rest tie-breakers; nan -> 0).
+    The spec's pair (coverage recall @ 0.99 of the raw box, tightness) is evaluated over ALL decoded candidates
+    (conf >= 0.001, up to 300 per frame), so it is confidence-blind: in det_A run #6 it chose epoch 0, whose 300
+    untrained boxes covered 65 % of the objects while recall50 was 0. cfg select_keys therefore defaults to the
+    ROI operating-point pair (coverage_recall99_roi_op, recall50_op), the boxes Stage 2 actually receives.
+    '''
+    def val(k):
+        v = summary[k]
+        return 0.0 if (v is None or (isinstance(v, float) and math.isnan(v))) else float(v)
+    return tuple(val(k) for k in keys)

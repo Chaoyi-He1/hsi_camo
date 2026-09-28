@@ -61,6 +61,7 @@ def get_args_parser():
     parser.add_argument('--pretrained', default='auto', help="'auto' downloads <variant>.pt, a path, or 'none'")
     parser.add_argument('--gate-entropy-weight', type=float, default=None, help='overrides cfg')
     parser.add_argument('--gate-lr', type=float, default=None, help='lr of the gate logits theta (session A); overrides cfg gate_lr')
+    parser.add_argument('--select-keys', nargs='+', default=None, help='val summary keys that rank checkpoints (primary first); overrides cfg select_keys')
     parser.add_argument('--contain-weight', type=float, default=None, help='overrides cfg')
     # data
     parser.add_argument('--data-path', default='/data2/chaoyi/HyperCOD/Raw data')
@@ -123,7 +124,7 @@ def load_cfg(args):
     with open(args.hpy) as f:
         cfg = yaml.safe_load(f)
     for k in ['gate_entropy_weight', 'gate_lr', 'contain_weight', 'conf_thres', 'iou_thres', 'roi_margin', 'roi_min',
-              'roi_conf', 'roi_topk', 'min_area']:
+              'roi_conf', 'roi_topk', 'min_area', 'select_keys']:
         if getattr(args, k) is None:
             setattr(args, k, cfg[k])
     args.max_norm = cfg.get('max_norm', 10.0); args.max_det = cfg.get('max_det', 300)
@@ -288,14 +289,14 @@ def main(args):
                 w = model_without_ddp.filter_bank.weights.detach().cpu().numpy(); volts = model_without_ddp.selected_voltages
                 logger.histogram('gate/weights', w, epoch); logger.scalars({'gate/max': w.max(), 'gate/entropy': float(model_without_ddp.filter_bank.entropy().detach())}, epoch)
                 order = np.argsort(-w)[:20]; logger.table('gate/top20', ['rank', 'voltage', 'weight'], [[r + 1, float(volts[i]), float(w[i])] for r, i in enumerate(order)], epoch)
-            score = select_score(val)
+            score = select_score(val, args.select_keys)
             if score > best:                                     # before model_{epoch}, so it stores the best including this epoch
                 best = score; save_checkpoint(os.path.join(args.output_dir, 'model_best'), model_without_ddp, optimizer, scaler, scheduler, epoch, args, best)
             if (epoch + 1) % args.save_every == 0 or epoch + 1 == args.epochs:
                 save_checkpoint(os.path.join(args.output_dir, f'model_{epoch}'), model_without_ddp, optimizer, scaler, scheduler, epoch, args, best)
             with open(results_path, 'a') as f:
                 f.write(json.dumps({'epoch': epoch, 'train': train_stats, 'val': val, 'best': list(best)}) + '\n')
-    print(f"Training time {datetime.timedelta(seconds=int(time.time() - start))}, best (coverage_recall99, tightness) = {best}")
+    print(f"Training time {datetime.timedelta(seconds=int(time.time() - start))}, best {tuple(args.select_keys)} = {best}")
 
     if utils.is_main_process():
         best_ckpt = torch.load(os.path.join(args.output_dir, 'model_best'), map_location='cpu', weights_only=False)

@@ -23,7 +23,7 @@ def test_export_operating_point_comes_from_cfg(synthetic_root, tmp_path):
     with open(args.hpy) as f:
         cfg = yaml.safe_load(f)
     assert args.max_rois is None and (args.roi_conf, args.roi_topk) == (cfg['roi_conf'], cfg['roi_topk'])
-    assert (args.roi_conf, args.roi_topk) == (0.25, 5)      # the operating point evaluate()'s *_op keys use
+    assert (args.roi_conf, args.roi_topk) == (0.02, 5)      # the operating point evaluate()'s *_op keys use (calibrated on det_A)
 
 
 def test_dataset_kwargs_defaults_to_the_training_cache(synthetic_root, tmp_path):

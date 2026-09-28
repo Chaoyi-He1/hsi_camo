@@ -94,3 +94,11 @@ def test_operating_point_metrics_equal_the_plain_ones_when_all_dets_pass():
     trunc = BoxMetrics(roi_margin=1.0, roi_min=0, roi_conf=0.25, roi_topk=2)
     trunc.update(m, dets); st = trunc.summary()
     assert st['dets_per_image'] == 3 and st['dets_per_image_op'] == 2   # the 0.7 spurious box is cut by top-k
+
+
+def test_select_score_custom_keys_and_nan():
+    s = {'coverage_recall99_raw': 0.5, 'tightness': float('nan'), 'coverage_recall99_roi_op': 0.4, 'recall50_op': 0.3}
+    assert select_score(s) == (0.5, 0.0)                                              # spec default, nan -> 0
+    assert select_score(s, ['coverage_recall99_roi_op', 'recall50_op']) == (0.4, 0.3)
+    assert select_score(s, ('recall50_op',)) == (0.3,)
+    assert select_score({**s, 'recall50_op': None}, ['recall50_op']) == (0.0,)
