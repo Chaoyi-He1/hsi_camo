@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 import torch
 
-from data_loader.cube_cache import build_cube_cache, cache_path, default_cache_dir
+from data_loader.cube_cache import build_cube_cache, cache_path, default_cache_dir, read_npy_direct
 from data_loader.my_dataset import HyperCOD_data
 from tests.conftest import H, W
 
@@ -97,3 +97,29 @@ def test_filter_bank_tensors_match_p99z_instance(synthetic_root):
     np.testing.assert_allclose(R, ref.sensor_R_matrix); np.testing.assert_allclose(mean, ref.channel_mean)
     np.testing.assert_allclose(std, ref.channel_std); np.testing.assert_allclose(volts, ref.selected_voltages)
     assert R.dtype == np.float32 and R.shape == (133, 12)
+
+
+def test_read_npy_direct_matches_np_load(tmp_path):
+    rng = np.random.default_rng(0)
+    arrays = [rng.standard_normal((133, 48, 40)).astype(np.float16),      # 510 KB + header: not a multiple of 4096
+              np.arange(3, dtype=np.float32),                                # smaller than one block
+              rng.integers(0, 255, (5, 4096), dtype=np.uint8)]                 # data start inside the first block
+    for i, a in enumerate(arrays):
+        p = tmp_path / f'a{i}.npy'; np.save(p, a)
+        b = read_npy_direct(str(p))
+        assert b.shape == a.shape and b.dtype == a.dtype and b.flags['C_CONTIGUOUS'] and b.flags.writeable
+        np.testing.assert_array_equal(b, np.load(p))
+        b[...] = 0                                                             # owns its memory: the file is untouched
+        np.testing.assert_array_equal(np.load(p), a)
+
+
+@pytest.mark.skipif(not os.path.isdir('/dev/shm'), reason='needs a tmpfs mount')
+def test_read_npy_direct_falls_back_without_o_direct():
+    import uuid
+    p = f'/dev/shm/hsi_camo_test_{uuid.uuid4().hex}.npy'
+    a = np.arange(1000, dtype=np.float16).reshape(10, 100)
+    try:
+        np.save(p, a)
+        np.testing.assert_array_equal(read_npy_direct(p), a)                   # tmpfs rejects O_DIRECT -> np.load
+    finally:
+        os.remove(p)

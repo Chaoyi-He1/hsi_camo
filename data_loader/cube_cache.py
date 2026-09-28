@@ -1,4 +1,7 @@
 import os
+import io
+import mmap
+import errno
 import argparse
 import numpy as np
 import torch
@@ -6,6 +9,46 @@ import torch
 from data_loader.ec_filter import band_indices
 
 CACHE_DIRNAME = 'cache_fp16'
+DIRECT_BLOCK = 4096          # O_DIRECT alignment for address, file offset and length
+
+
+def read_npy_direct(path):
+    '''
+    Read a whole .npy file with O_DIRECT into a page-aligned anonymous buffer; returns a writable array that owns
+    its memory (C order). Why: a cached frame is 0.55 GB and a training epoch streams 139 GB of them; read through
+    the page cache inside the training process (cache full, ~1 GB free) every DataLoader worker stalled in kernel
+    memory reclaim (memory PSI ~70 %, disk idle at ~10 MB/s, 17 s/step). O_DIRECT leaves the page cache alone and
+    the SATA SSD then delivers its ~380-420 MB/s to 4-6 workers. Falls back to np.load where O_DIRECT is not
+    supported (tmpfs -> EINVAL).
+    '''
+    size = os.path.getsize(path)
+    length = -(-size // DIRECT_BLOCK) * DIRECT_BLOCK      # aligned; the last read runs past EOF and comes back short
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
+    except OSError as e:
+        if e.errno == errno.EINVAL:
+            return np.load(path)
+        raise
+    buf = mmap.mmap(-1, length)                           # anonymous mapping: page-aligned address
+    view = memoryview(buf)
+    try:
+        got = 0
+        while got < size:
+            k = os.readv(fd, [view[got:length]])
+            assert k > 0, f"O_DIRECT read of {path} stopped at {got}/{size} bytes"
+            got += k
+    except OSError as e:
+        if e.errno == errno.EINVAL:                       # filesystem accepted the flag but not the read
+            return np.load(path)
+        raise
+    finally:
+        os.close(fd)
+    header = io.BytesIO(view[:min(length, 4 * DIRECT_BLOCK)].tobytes())
+    version = np.lib.format.read_magic(header)
+    read_header = np.lib.format.read_array_header_1_0 if version == (1, 0) else np.lib.format.read_array_header_2_0
+    shape, fortran_order, dtype = read_header(header)
+    assert not fortran_order, f"{path}: Fortran-ordered .npy is not supported"
+    return np.frombuffer(buf, dtype=dtype, count=int(np.prod(shape)), offset=header.tell()).reshape(shape)
 
 
 def default_cache_dir(data_path):

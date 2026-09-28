@@ -245,22 +245,18 @@ class HyperCOD_data(Dataset.Dataset):
         with h0:h0+ch.
         Returns [n_bands, cw, ch]: float32 from the .mat; from the cache a zero-copy float16 view when out_dtype
         is float16 (the hot path: a full 133x1680x1240 frame is 0.55 GB, so no fp32 upcast and no transpose pass
-        in the DataLoader workers; a full frame is read() into memory, a crop is sliced from the memmap),
+        in the DataLoader workers; a full frame is read with O_DIRECT into memory, a crop is sliced from the memmap),
         otherwise a float32 copy in the same memory order (astype(order='K')), so the final
         [C, cw, ch] -> [C, ch, cw] transpose in __getitem__ is free.
         '''
         if self.cache_dir is not None:
-            from data_loader.cube_cache import cache_path
+            from data_loader.cube_cache import cache_path, read_npy_direct
             p = cache_path(self.cache_dir, self.split, name)
             assert os.path.exists(p), f"cache file {p} missing; build it with: python -m data_loader.cube_cache --data_path '{self.data_path}' --split {self.split}"
             if (h0, w0, ch, cw) == (0, 0, self.H, self.W):
-                # full frame: one sequential read() into memory. Inside a training process, mmap page faults on
-                # cold frames ran 3-5x slower than the disk (4 workers: ~110 MB/s vs ~400-500 MB/s aggregate).
-                with open(p, 'rb') as f:
-                    os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_SEQUENTIAL)
-                    arr = np.load(f)                                         # [n_bands, H, W] fp16, writable
+                arr = read_npy_direct(p)              # full frame: O_DIRECT, bypasses the page cache (see cube_cache)
             else:
-                arr = np.load(p, mmap_mode='r')                               # crop: slice the memmap
+                arr = np.load(p, mmap_mode='r')       # crop: slice the memmap
             assert arr.shape == (self.n_bands, self.H, self.W) and arr.dtype == np.float16, \
                 f"cache {p} has {arr.shape} {arr.dtype}, expected ({self.n_bands}, {self.H}, {self.W}) float16"
             view = arr[:, h0:h0 + ch, w0:w0 + cw].transpose(0, 2, 1)   # lazy [n_bands, cw, ch] like the h5 path
