@@ -150,3 +150,11 @@ def select_filter_channels(R, voltages, num_filters=30, mode='uniform', filter_v
             f"filter_voltages {list(filter_voltages)} map to duplicate voltage channels {[round(float(voltages[i]), 2) for i in sel]}"
         return sel
     raise ValueError(f"unknown filter_select mode '{mode}', expected uniform | osp | all | manual")
+
+
+def band_indices(band_range, wavelens=WAVELENS_200):
+    '''Indices of the cube bands whose centre lies inside [lo, hi] nm (inclusive, contiguous).'''
+    lo, hi = float(band_range[0]), float(band_range[1])
+    idx = np.where((wavelens >= lo - 1e-6) & (wavelens <= hi + 1e-6))[0]
+    assert len(idx) > 0, f"band_range {band_range} contains no cube band (cube covers {wavelens[0]:.0f}-{wavelens[-1]:.0f} nm)"
+    return idx

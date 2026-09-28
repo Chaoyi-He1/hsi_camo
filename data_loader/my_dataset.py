@@ -8,7 +8,7 @@ import h5py
 import torch
 from PIL import Image
 
-from data_loader.ec_filter import (N_BANDS, WAVELENS_200, load_ec_filter, align_filter_to_wavelens,
+from data_loader.ec_filter import (N_BANDS, WAVELENS_200, band_indices, load_ec_filter, align_filter_to_wavelens,
                                    select_filter_channels)
 from data_loader.band_stats import STATS_CROP_SIZE, default_stats_path, load_band_stats, compute_band_stats
 
@@ -19,7 +19,7 @@ HYPERCUBE_KEY = 'hypercube'   # variable name inside the MATLAB v7.3 (HDF5) .mat
 class HyperCOD_data(Dataset.Dataset):
     def __init__(self, data_path, split='train', use_filter=True, filter_path=None, num_filters=30,
                  filter_select='uniform', filter_voltages=None, crop_size=512, obj_crop_prob=0.5,
-                 norm='p99z', filter_norm='l1', stats_path=None, seed=None):
+                 norm='p99z', band_range=(400.0, 800.0), filter_norm='l1', stats_path=None, seed=None):
         super(HyperCOD_data, self).__init__()
         self.data_path = data_path
         self.split = split  # 'train' or 'test'
@@ -36,7 +36,12 @@ class HyperCOD_data(Dataset.Dataset):
         # 'l1' divides every selected filter column by its L1 norm, so a channel is a weighted average of bands
         # (same scale as a raw band) instead of a weighted sum ~20-65x larger; 'none' keeps the peak-normalised columns
         self.filter_norm = filter_norm
-        self.stats_path = stats_path if stats_path is not None else default_stats_path(data_path)
+        # wavelength window (nm) the loader restricts the cube bands to; defaults to the EC sensor's own
+        # measured range 400-800 nm. (400, 1000) keeps all 200 bands (today's behaviour, unchanged csv/stats file).
+        self.band_range = (float(band_range[0]), float(band_range[1]))
+        self.band_idx = band_indices(self.band_range)     # [n_bands] contiguous indices into the 200 cube bands
+        self.n_bands = len(self.band_idx)
+        self.stats_path = stats_path if stats_path is not None else default_stats_path(data_path, self.band_range)
         self.seed = seed
         # never keep the random module itself on the instance: a module is not picklable, which breaks
         # DataLoader workers with the spawn/forkserver start methods; see the rng property
@@ -64,8 +69,8 @@ class HyperCOD_data(Dataset.Dataset):
         for name in self.img_name:
             assert os.path.exists(os.path.join(self.gt_path, f'{name}.png')), f"GT for sample {name} not found in {self.gt_path}"
 
-        # self.wavelens is shape [200], 400 nm to 1000 nm, uniform 3.015 nm step
-        self.wavelens = WAVELENS_200.copy()
+        # self.wavelens is shape [n_bands], the cube band centres inside band_range (uniform 3.015 nm step)
+        self.wavelens = WAVELENS_200[self.band_idx].copy()
 
         # image size from the first GT; the cube layout is verified against it
         self.H, self.W = self.load_gt(self.img_name[0]).shape
@@ -78,7 +83,7 @@ class HyperCOD_data(Dataset.Dataset):
 
         self.scale = self.load_intensity_scale() if self.norm in ['p99', 'p99z'] else None
 
-        self.in_channels = self.sensor_R_matrix.shape[1] if self.use_filter else N_BANDS
+        self.in_channels = self.sensor_R_matrix.shape[1] if self.use_filter else self.n_bands
 
         # per-channel mean/std [C] for norm='p99z' (None otherwise), applied after the filter projection
         self.channel_mean, self.channel_std = self.load_channel_stats() if self.norm == 'p99z' else (None, None)
@@ -132,17 +137,22 @@ class HyperCOD_data(Dataset.Dataset):
 
     def load_intensity_scale(self):
         '''
-        Per-sample scale = intensity_p99_valid / N_BANDS from intensity_p99_summary.csv, where the
-        intensity map is the sum of the 200 bands. Dividing the cube by it puts bright-pixel band values
-        near 1 and removes the ~40x scene-to-scene brightness spread.
-        Filter channels are then ~sum_b |R[b, n]| (self.filter_gain, about 20-65x) larger than single band values.
+        Per-sample scale = p99 of the band sum inside the window / n_bands. For the full 400-1000 nm window this is
+        intensity_p99_valid / 200 from the dataset's csv; for a narrower window the 99th percentile of the windowed
+        band sum is computed once per sample from the cubes and cached next to the original csv.
         '''
-        csv_path = os.path.join(self.intensity_path, 'intensity_p99_summary.csv')
-        assert os.path.exists(csv_path), f"{csv_path} not found (needed for norm='p99')"
+        if self.n_bands == N_BANDS:
+            csv_path = os.path.join(self.intensity_path, 'intensity_p99_summary.csv')
+            assert os.path.exists(csv_path), f"{csv_path} not found (needed for norm='p99')"
+        else:
+            csv_path = window_p99_csv_path(self.data_path, self.split, self.band_range)
+            if not os.path.exists(csv_path):
+                compute_window_p99(self.data_path, self.split, self.band_range,
+                                   num_workers=0 if len(self.img_name) < 8 else min(8, os.cpu_count() or 1))
         scale = {}
         with open(csv_path, newline='') as f:
             for row in csv.DictReader(f):
-                scale[row['sample_id']] = float(row['intensity_p99_valid']) / N_BANDS
+                scale[row['sample_id']] = float(row['intensity_p99_valid']) / self.n_bands
         for name in self.img_name:
             assert name in scale, f"sample {name} missing from {csv_path}"
             assert scale[name] > 0, f"non-positive intensity p99 for sample {name}"
@@ -150,25 +160,26 @@ class HyperCOD_data(Dataset.Dataset):
 
     def load_channel_stats(self):
         '''
-        Per-channel mean/std for norm='p99z' from the training band statistics (mean [200], cov [200, 200] of
-        the p99-normalised bands; built from the train split on first use, see band_stats.compute_band_stats).
+        Per-channel mean/std for norm='p99z' from the training band statistics (mean [n_bands], cov
+        [n_bands, n_bands] of the p99-normalised bands inside band_range; built from the train split on first
+        use, see band_stats.compute_band_stats).
         Standardisation is applied AFTER the filter projection - a real detector integrates over wavelength
         before readout, so per-band means cannot be subtracted first - and the channel statistics follow from
         the band statistics by linearity: mean_y = R^T mu, var_y = diag(R^T Sigma R).
-        Returns (channel_mean [C], channel_std [C]) as float32, C = N filter channels or 200 raw bands.
+        Returns (channel_mean [C], channel_std [C]) as float32, C = N filter channels or n_bands raw bands.
         '''
         if not os.path.exists(self.stats_path):
             crop_size = STATS_CROP_SIZE if min(self.H, self.W) >= STATS_CROP_SIZE else 0  # tiny cubes: full frames
             num_workers = 0 if len(self) < 8 else min(8, os.cpu_count() or 1)
             compute_band_stats(self.data_path, self.stats_path, crop_size=crop_size, num_workers=num_workers,
-                               filter_path=self.filter_path)
-        mu, cov = load_band_stats(self.stats_path)  # [200], [200, 200]
+                               filter_path=self.filter_path, band_range=self.band_range)
+        mu, cov = load_band_stats(self.stats_path, band_range=self.band_range)  # [n_bands], [n_bands, n_bands]
         if self.use_filter:
-            R = self.sensor_R_matrix.astype(np.float64)  # [200, N]
+            R = self.sensor_R_matrix.astype(np.float64)  # [n_bands, N]
             mean = R.T @ mu  # [N]
             var = np.einsum('bn,bc,cn->n', R, cov, R)  # [N]
         else:
-            mean, var = mu, np.diag(cov)  # [200]
+            mean, var = mu, np.diag(cov)  # [n_bands]
         std = np.sqrt(np.maximum(var, 0.0))
         assert (std > 0).all(), f"zero-variance channels in {self.stats_path}: {np.where(std == 0)[0].tolist()}"
         return mean.astype(np.float32), std.astype(np.float32)
@@ -190,15 +201,17 @@ class HyperCOD_data(Dataset.Dataset):
 
     def read_cube_block(self, name, h0, w0, ch, cw):
         '''
-        Read a spatial window of the cube directly from the .mat (HDF5) file.
+        Read a spatial window of the cube directly from the .mat (HDF5) file, restricted to the bands inside
+        band_range (self.band_idx is contiguous, so this is a single hyperslab on the band axis).
         h5py layout is [B, W, H], so W is indexed with w0:w0+cw and H with h0:h0+ch.
-        Returns float32 [B, cw, ch]. The file is opened per call so DataLoader workers stay independent.
+        Returns float32 [n_bands, cw, ch]. The file is opened per call so DataLoader workers stay independent.
         '''
+        b0, b1 = int(self.band_idx[0]), int(self.band_idx[-1]) + 1
         with h5py.File(os.path.join(self.hsi_path, f'{name}.mat'), 'r') as f:
-            blk = f[HYPERCUBE_KEY][:, w0:w0 + cw, h0:h0 + ch]
+            blk = f[HYPERCUBE_KEY][b0:b1, w0:w0 + cw, h0:h0 + ch]
         blk = np.asarray(blk, dtype=np.float32)
-        assert blk.shape == (N_BANDS, cw, ch), \
-            f"cube {name}: window (h0={h0}, w0={w0}, ch={ch}, cw={cw}) returned {blk.shape}, expected ({N_BANDS}, {cw}, {ch}); is this cube smaller than the first sample?"
+        assert blk.shape == (self.n_bands, cw, ch), \
+            f"cube {name}: window (h0={h0}, w0={w0}, ch={ch}, cw={cw}) returned {blk.shape}, expected ({self.n_bands}, {cw}, {ch}); is this cube smaller than the first sample?"
         return blk
 
     def crop_window(self, gt):
@@ -250,6 +263,33 @@ class HyperCOD_data(Dataset.Dataset):
         return img, gt, name
 
 
+def window_p99_csv_path(data_path, split, band_range):
+    lo, hi = int(round(band_range[0])), int(round(band_range[1]))
+    return os.path.join(data_path, split, 'intensity map', f'intensity_p99_{lo}_{hi}.csv')
+
+
+def compute_window_p99(data_path, split, band_range, num_workers=8):
+    '''Write intensity_p99_<lo>_<hi>.csv (same columns as intensity_p99_summary.csv) from the windowed band sums.'''
+    ds = HyperCOD_data(data_path, split=split, use_filter=False, norm='none', crop_size=0, band_range=band_range,
+                       filter_norm='none')
+    loader = torch.utils.data.DataLoader(ds, batch_size=1, shuffle=False, num_workers=num_workers, collate_fn=image_collate_fn)
+    rows = []
+    print(f"Computing {band_range} nm p99 intensity for {len(ds)} {split} cubes...")
+    for img, _, name in loader:                                   # img [1, n_bands, H, W]
+        s = img[0].sum(dim=0).numpy()                             # [H, W] windowed band sum
+        rows.append((name[0], s.shape[0], s.shape[1], ds.n_bands, s.size,
+                     float(np.percentile(s, 99)), float(s.min()), float(s.mean()), float(s.max())))
+    csv_path = window_p99_csv_path(data_path, split, band_range)
+    with open(csv_path, 'w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(['sample_id', 'mat_path', 'intensity_map_path', 'height', 'width', 'bands', 'n_valid',
+                    'intensity_p99_valid', 'intensity_min_valid', 'intensity_mean_valid', 'intensity_max_valid'])
+        for name, h, wd, b, n, p99, mn, me, mx in rows:
+            w.writerow([name, '', '', h, wd, b, n, p99, mn, me, mx])
+    print(f"Saved {csv_path}")
+    return csv_path
+
+
 def image_collate_fn(batch):
     img, gt, name = list(zip(*batch))
     # the dataset gives [C, H, W] / [1, H, W] numpy arrays; stack to [B, C, H, W] / [B, 1, H, W] float32 tensors
@@ -280,6 +320,8 @@ def add_dataset_args(parser):
                         help='p99: per-sample scaling by intensity p99 / 200 from intensity_p99_summary.csv; '
                              'p99z: p99 followed by per-channel standardisation with training band statistics '
                              '(band_stats_train.npz, built on first use)')
+    parser.add_argument('--band_range', type=float, nargs=2, default=[400.0, 800.0],
+                        help='wavelength window in nm (default the EC sensor range 400-800; 400 1000 uses all 200 bands)')
     parser.add_argument('--filter_norm', type=str, default='l1', choices=['none', 'l1'],
                         help='l1: divide each filter column by its L1 norm so channels are weighted averages of bands; '
                              'none: keep the peak-normalised columns (channels ~20-65x larger, see HyperCOD_data.filter_gain)')
@@ -293,7 +335,8 @@ def build_dataset(args, split):
                          filter_path=args.filter_path, num_filters=args.num_filters,
                          filter_select=args.filter_select, filter_voltages=args.filter_voltages,
                          crop_size=args.crop_size, obj_crop_prob=args.obj_crop_prob, norm=args.norm,
-                         filter_norm=args.filter_norm, stats_path=args.stats_path)
+                         band_range=tuple(args.band_range), filter_norm=args.filter_norm,
+                         stats_path=args.stats_path)
 
 
 if __name__ == '__main__':

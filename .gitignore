@@ -5,3 +5,9 @@ results/
 *.pth
 *.log
 .superpowers/
+.claude/
+weights/
+runs/
+wandb/
+results/
+*.pt

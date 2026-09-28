@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import torch
 
-from data_loader.ec_filter import N_BANDS, WAVELENS_200, FILTER_DEAD_ZONE_V
+from data_loader.ec_filter import WAVELENS_200, FILTER_DEAD_ZONE_V
 from data_loader.my_dataset import HyperCOD_data, image_collate_fn, add_dataset_args, build_dataset
 from tests.conftest import H, W, OBJ_SLICE
 
@@ -31,10 +31,9 @@ def test_init_lists_samples_sorted_numerically(synthetic_root):
 def test_init_aligns_filter_and_selects_channels(synthetic_root):
     root, _, (wl, volt, R) = synthetic_root
     ds = make(root, num_filters=30)
-    np.testing.assert_allclose(ds.wavelens, WAVELENS_200)
-    assert ds.sensor_R_matrix.shape == (N_BANDS, 30) and ds.sensor_R_matrix.dtype == np.float32
+    np.testing.assert_allclose(ds.wavelens, WAVELENS_200[:133])
+    assert ds.sensor_R_matrix.shape == (133, 30) and ds.sensor_R_matrix.dtype == np.float32
     assert ds.valid_band_mask.sum() == 133
-    assert np.all(ds.sensor_R_matrix[133:] == 0.0)
     assert len(ds.selected_indices) == 30
     np.testing.assert_allclose(ds.selected_voltages, volt[ds.selected_indices])
     lo, hi = FILTER_DEAD_ZONE_V
@@ -47,8 +46,8 @@ def test_in_channels_follows_use_filter(synthetic_root):
     root, _, _ = synthetic_root
     assert make(root, use_filter=True, num_filters=12).in_channels == 12
     ds_raw = make(root, use_filter=False)
-    assert ds_raw.in_channels == N_BANDS
-    assert ds_raw.sensor_R_matrix.shape == (N_BANDS, 30)        # aligned at init regardless
+    assert ds_raw.in_channels == 133
+    assert ds_raw.sensor_R_matrix.shape == (133, 30)        # aligned at init regardless
 
 
 def test_init_manual_voltages(synthetic_root):
@@ -62,7 +61,9 @@ def test_intensity_scale(synthetic_root):
     root, info, _ = synthetic_root
     ds = make(root, norm='p99')
     assert set(ds.scale) == {'3', '10'}
-    assert np.isclose(ds.scale['3'], info[('train', '3')][2] / N_BANDS)
+    cube = info[('train', '3')][0]                                    # [200, W, H]
+    p99_133 = np.percentile(cube[:133].sum(axis=0), 99)
+    assert np.isclose(ds.scale['3'], p99_133 / 133, rtol=1e-5)
     assert make(root, norm='none').scale is None
 
 
@@ -102,8 +103,8 @@ def test_read_cube_block_matches_h5_layout(synthetic_root):
     ds = make(root)
     cube = info[('train', '3')][0]                                # [B, W, H]
     blk = ds.read_cube_block('3', h0=5, w0=7, ch=16, cw=12)
-    assert blk.shape == (N_BANDS, 12, 16) and blk.dtype == np.float32
-    np.testing.assert_array_equal(blk, cube[:, 7:19, 5:21])
+    assert blk.shape == (133, 12, 16) and blk.dtype == np.float32
+    np.testing.assert_array_equal(blk, cube[:133, 7:19, 5:21])
 
 
 def test_crop_window_full_frame_for_test_split_or_zero_crop(synthetic_root):
@@ -149,8 +150,8 @@ def test_getitem_raw_full_frame_values(synthetic_root):
     img, gt, name = ds[0]
     cube, gt_true, _ = info[('test', '7')]
     assert name == '7'
-    assert img.shape == (N_BANDS, H, W) and img.dtype == np.float32 and img.flags['C_CONTIGUOUS']
-    np.testing.assert_array_equal(img, cube.transpose(0, 2, 1))   # [B, W, H] -> [B, H, W]
+    assert img.shape == (133, H, W) and img.dtype == np.float32 and img.flags['C_CONTIGUOUS']
+    np.testing.assert_array_equal(img, cube[:133].transpose(0, 2, 1))   # [B, W, H] -> [B, H, W]
     assert gt.shape == (1, H, W) and gt.dtype == np.float32
     np.testing.assert_array_equal(gt[0], gt_true.astype(np.float32))
 
@@ -160,7 +161,7 @@ def test_getitem_raw_crop(synthetic_root):
     ds = make(root, use_filter=False, crop_size=16, obj_crop_prob=1.0, seed=4)
     img, gt, name = ds[1]
     assert name == '10'
-    assert img.shape == (N_BANDS, 16, 16) and gt.shape == (1, 16, 16)
+    assert img.shape == (133, 16, 16) and gt.shape == (1, 16, 16)
     assert gt.sum() > 0
     assert set(np.unique(gt)) <= {0.0, 1.0}
 
@@ -180,10 +181,7 @@ def test_getitem_filter_equals_einsum_on_raw(synthetic_root):
 def test_getitem_filter_uses_only_bands_below_800nm(synthetic_root):
     root, _, _ = synthetic_root
     ds = make(root, split='test', use_filter=True)
-    img_r, _, _ = make(root, split='test', use_filter=False)[0]
-    img_f, _, _ = ds[0]
-    expected = np.einsum('bn,bhw->nhw', ds.sensor_R_matrix[:133], img_r[:133])
-    np.testing.assert_allclose(img_f, expected, rtol=1e-5, atol=1e-6)
+    assert ds.sensor_R_matrix.shape[0] == 133
 
 
 def test_getitem_filter_crop_shape(synthetic_root):
@@ -195,11 +193,12 @@ def test_getitem_filter_crop_shape(synthetic_root):
 
 def test_getitem_p99_norm_scales_by_p99_over_bands(synthetic_root):
     root, info, _ = synthetic_root
-    p99 = info[('test', '7')][2]
+    cube = info[('test', '7')][0]                                      # [200, W, H]
+    p99_133 = np.percentile(cube[:133].sum(axis=0), 99)
     for use_filter in (False, True):
         img_none, _, _ = make(root, split='test', use_filter=use_filter, norm='none')[0]
         img_p99, _, _ = make(root, split='test', use_filter=use_filter, norm='p99')[0]
-        np.testing.assert_allclose(img_p99, img_none / np.float32(p99 / N_BANDS), rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(img_p99, img_none / np.float32(p99_133 / 133), rtol=1e-5, atol=1e-6)
 
 
 def test_collate_stacks_to_bchw(synthetic_root):
@@ -218,6 +217,7 @@ def test_add_dataset_args_defaults():
     assert args.filter_path is None and args.use_filter is False
     assert (args.num_filters, args.filter_select, args.filter_voltages) == (30, 'uniform', None)
     assert (args.crop_size, args.obj_crop_prob, args.norm) == (512, 0.5, 'p99z')
+    assert args.band_range == [400.0, 800.0]
     assert (args.filter_norm, args.stats_path) == ('l1', None)
 
 
@@ -307,12 +307,12 @@ def test_filter_norm_l1_output_bounded_by_band_values(synthetic_root):
 
 def test_p99z_autobuilds_stats_and_standardizes_raw(synthetic_root):
     root, _, _ = synthetic_root
-    stats_path = root / 'band_stats_train.npz'
+    stats_path = root / 'band_stats_train_400_800.npz'
     assert not stats_path.exists()
     ds = make(root, split='test', use_filter=False, norm='p99z')     # stats come from the train split
     assert stats_path.exists() and ds.stats_path == str(stats_path)
     st = np.load(stats_path)
-    assert st['mean'].shape == (N_BANDS,) and st['cov'].shape == (N_BANDS, N_BANDS)
+    assert st['mean'].shape == (133,) and st['cov'].shape == (133, 133)
     assert int(st['n_pixels']) == 2 * H * W and int(st['n_samples']) == 2       # tiny fixture -> full frames
     np.testing.assert_allclose(ds.channel_mean, st['mean'], rtol=1e-6)
     np.testing.assert_allclose(ds.channel_std, np.sqrt(np.diag(st['cov'])), rtol=1e-6)
@@ -327,7 +327,7 @@ def test_p99z_autobuilds_stats_and_standardizes_raw(synthetic_root):
 def test_p99z_train_pixels_are_standard(synthetic_root):
     root, _, _ = synthetic_root
     ds = make(root, use_filter=False, norm='p99z', crop_size=0)        # the same pixels the stats were built from
-    x = np.concatenate([ds[i][0].reshape(N_BANDS, -1) for i in range(len(ds))], axis=1)   # [200, 2*H*W]
+    x = np.concatenate([ds[i][0].reshape(133, -1) for i in range(len(ds))], axis=1)   # [133, 2*H*W]
     np.testing.assert_allclose(x.mean(axis=1), 0.0, atol=1e-4)
     np.testing.assert_allclose(x.std(axis=1), 1.0, rtol=1e-3)
 
@@ -337,8 +337,8 @@ def test_p99z_filter_channels_use_projected_stats(synthetic_root):
     kw = dict(use_filter=True, num_filters=12, filter_norm='l1')
     ds_z = make(root, split='test', norm='p99z', **kw)
     ds_p = make(root, split='test', norm='p99', **kw)
-    st = np.load(root / 'band_stats_train.npz')
-    R = ds_p.sensor_R_matrix.astype(np.float64)                             # [200, 12]
+    st = np.load(root / 'band_stats_train_400_800.npz')
+    R = ds_p.sensor_R_matrix.astype(np.float64)                             # [133, 12]
     mean_y = R.T @ st['mean']                                               # [12]
     std_y = np.sqrt(np.einsum('bn,bc,cn->n', R, st['cov'], R))              # [12]
     np.testing.assert_allclose(ds_z.channel_mean, mean_y, rtol=1e-5)
@@ -356,7 +356,7 @@ def test_p99z_filter_channels_use_projected_stats(synthetic_root):
 def test_p99z_reuses_existing_stats_file(synthetic_root):
     root, _, _ = synthetic_root
     make(root, norm='p99z')                                      # builds the file
-    stats_path = root / 'band_stats_train.npz'
+    stats_path = root / 'band_stats_train_400_800.npz'
     mtime = os.path.getmtime(stats_path)
     ds = make(root, norm='p99z', split='test')                   # must load, not rebuild
     assert os.path.getmtime(stats_path) == mtime and ds.channel_mean is not None
