@@ -61,6 +61,9 @@ def get_args_parser():
     parser.add_argument('--pretrained', default='auto', help="'auto' downloads <variant>.pt, a path, or 'none'")
     parser.add_argument('--gate-entropy-weight', type=float, default=None, help='overrides cfg')
     parser.add_argument('--gate-lr', type=float, default=None, help='lr of the gate logits theta (session A); overrides cfg gate_lr')
+    parser.add_argument('--raw-bands', action='store_true',
+                        help='control run: feed the raw cube bands of --band-range straight into YOLO (identity projection, '
+                             'band-statistics standardisation, no weight vector) instead of EC filter responses; pass it again with --eval/--resume')
     parser.add_argument('--select-keys', nargs='+', default=None, help='val summary keys that rank checkpoints (primary first); overrides cfg select_keys')
     parser.add_argument('--contain-weight', type=float, default=None, help='overrides cfg')
     # data
@@ -285,7 +288,7 @@ def main(args):
         # the numbers; the other ranks simply wait at the next epoch's first all-reduce.
         if utils.is_main_process():
             val = evaluate(model_without_ddp, loader_val, device, logger=logger, epoch=epoch, tag='val', **eval_kw)
-            if args.session == 'A':
+            if args.session == 'A' and model_without_ddp.filter_bank.weight_vector:      # no gate in a --raw-bands control
                 w = model_without_ddp.filter_bank.weights.detach().cpu().numpy(); volts = model_without_ddp.selected_voltages
                 logger.histogram('gate/weights', w, epoch); logger.scalars({'gate/max': w.max(), 'gate/entropy': float(model_without_ddp.filter_bank.entropy().detach())}, epoch)
                 order = np.argsort(-w)[:20]; logger.table('gate/top20', ['rank', 'voltage', 'weight'], [[r + 1, float(volts[i]), float(w[i])] for r, i in enumerate(order)], epoch)
@@ -308,7 +311,7 @@ def main(args):
             # epoch number, like every per-epoch line above it (deviation from the brief, which only wrote
             # 'best_epoch' here, leaving the final line without an 'epoch' field).
             f.write(json.dumps({'epoch': best_ckpt['epoch'], 'final': True, 'best_epoch': best_ckpt['epoch'], 'val': val, 'test': test}) + '\n')
-        if args.session == 'A':
+        if args.session == 'A' and model_without_ddp.filter_bank.weight_vector:          # no ranking without a gate
             k = min(args.top_k, model_without_ddp.filter_bank.n_channels)
             idx, w, volts = select_top_k(model_without_ddp, k, csv_path=os.path.join(args.output_dir, 'gate_ranking.csv'))
             with open(os.path.join(args.output_dir, 'top_k.json'), 'w') as f:

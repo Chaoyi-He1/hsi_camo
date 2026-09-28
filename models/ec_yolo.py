@@ -153,8 +153,17 @@ class ECYolo(nn.Module):
 
 def build_ec_yolo(args, dataset):
     '''Session A: all selected voltages + weight vector; session B: fixed channels, no weight vector (initialised by slice_to_channels).'''
-    R, mean, std, volts = dataset.filter_bank_tensors()
-    fb = FilterBank(R, mean, std, weight_vector=(args.session == 'A'))
+    if getattr(args, 'raw_bands', False):
+        # control run: the raw cube bands inside band_range go straight into YOLO (identity projection, standardised
+        # with the training band statistics, no weight vector) to compare against the EC filter responses
+        mu, cov = dataset._band_stats()                                                  # [n_bands], [n_bands, n_bands]
+        R = np.eye(dataset.n_bands, dtype=np.float32)
+        mean, std = mu.astype(np.float32), np.sqrt(np.maximum(np.diag(cov), 0.0)).astype(np.float32)
+        volts, weight_vector = dataset.wavelens.copy(), False                            # 'voltages' = band centres (nm)
+    else:
+        R, mean, std, volts = dataset.filter_bank_tensors()
+        weight_vector = (args.session == 'A')
+    fb = FilterBank(R, mean, std, weight_vector=weight_vector)
     pretrained = None if args.pretrained == 'none' else (download_pretrained(args.yolo_variant) if args.pretrained == 'auto' else args.pretrained)
     yolo, n_matched, n_total = build_detection_model(args.yolo_variant, fb.n_channels, pretrained, nc=1, epochs=args.epochs)
     print(f"{args.yolo_variant}: {fb.n_channels} input channels, pretrained tensors reused {n_matched}/{n_total}")
