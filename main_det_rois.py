@@ -52,7 +52,8 @@ def main(args):
     for batch in loader:
         img = batch['img'].to(device)
         with torch.autocast(device.type, enabled=device.type == 'cuda' and args.amp):
-            dets = decode_predictions(model(img), conf_thres=args.conf_thres, iou_thres=args.iou_thres, max_det=args.max_det)[0]
+            dets = decode_predictions(model(img), conf_thres=args.conf_thres, iou_thres=args.iou_thres,
+                                      max_det=args.max_det, end2end=getattr(model.yolo, 'end2end', None))[0]
         H, W = img.shape[-2:]
         dets = filter_to_operating_point(dets, args.roi_conf, args.roi_topk)         # shared with BoxMetrics' *_op keys
         dets[:, [0, 2]] = dets[:, [0, 2]].clip(0, W); dets[:, [1, 3]] = dets[:, [1, 3]].clip(0, H)

@@ -96,7 +96,8 @@ def evaluate(model, data_loader, device, conf_thres=0.001, iou_thres=0.6, max_de
         img = batch['img'].to(device, non_blocking=True)
         with torch.autocast(device.type, enabled=amp and device.type == 'cuda'):
             out = model(img)
-        dets = decode_predictions(out, conf_thres=conf_thres, iou_thres=iou_thres, max_det=max_det)
+        dets = decode_predictions(out, conf_thres=conf_thres, iou_thres=iou_thres, max_det=max_det,
+                                  end2end=getattr(model.yolo, 'end2end', None))
         H, W = img.shape[-2:]
         for b, mask in enumerate(batch['masks']):
             d = dets[b].copy()

@@ -190,11 +190,18 @@ def slice_to_channels(ecyolo, indices, variant, pretrained_path=None):
     return new
 
 
-def decode_predictions(out, conf_thres=0.001, iou_thres=0.6, max_det=300, nc=1):
-    '''Raw YOLO output -> per image float32 [M, 6] (x1, y1, x2, y2, conf, cls) in padded-frame pixels.'''
+def decode_predictions(out, conf_thres=0.001, iou_thres=0.6, max_det=300, nc=1, end2end=None):
+    '''
+    Raw YOLO output -> per image float32 [M, 6] (x1, y1, x2, y2, conf, cls) in padded-frame pixels.
+    end2end=True reads the one-to-one head's [B, max_det, 6] rows directly (no NMS); False decodes the
+    one-to-many [B, 4+nc, A] through NMS. None guesses from the column count - pass the model's own
+    yolo.end2end where it is known, since [B, 4+nc, A] is ambiguous when A == 6.
+    '''
     pred = out[0] if isinstance(out, (list, tuple)) else out
-    if pred.ndim == 3 and pred.shape[1] == 4 + nc:                                     # [B, 4+nc, A]: decode + NMS
-        dets = non_max_suppression(pred.float(), conf_thres=conf_thres, iou_thres=iou_thres, nc=nc, max_det=max_det)
-    else:                                                                              # [B, max_det, 6]: end-to-end head
+    if end2end is None:
+        end2end = pred.ndim == 3 and pred.shape[-1] == 6 and pred.shape[1] != 4 + nc
+    if end2end:                                                                        # [B, max_det, 6]: end-to-end head
         dets = [d[d[:, 4] >= conf_thres][:max_det] for d in pred.float()]
+    else:                                                                              # [B, 4+nc, A]: decode + NMS
+        dets = non_max_suppression(pred.float(), conf_thres=conf_thres, iou_thres=iou_thres, nc=nc, max_det=max_det)
     return [d.detach().cpu().numpy().astype(np.float32).reshape(-1, 6) for d in dets]
