@@ -64,10 +64,13 @@ def test_cache_float16_path_is_a_view_and_matches_h5(synthetic_root):
         b, _, _ = make(root, cache_dir=cdir, out_dtype='float16', **kw)[0]
         assert a.dtype == b.dtype == np.float16 and a.shape == b.shape and b.flags['C_CONTIGUOUS']
         np.testing.assert_allclose(a.astype(np.float32), b.astype(np.float32), rtol=4e-3, atol=1e-3)
-    # full frame without filter: the returned image is produced without any float32 intermediate
+    # full frame without filter: the returned image is produced without any float32 intermediate; the full frame
+    # is read() into memory (not a memmap) and scaled in place, so the returned image owns its data
     ds = make(root, cache_dir=cdir, split='test', use_filter=False, norm='p99', out_dtype='float16')
+    full = ds.read_cube_block(ds.img_name[0], 0, 0, H, W)
+    assert not isinstance(full, np.memmap) and full.flags.writeable and full.shape == (133, W, H)
     img, _, _ = ds[0]
-    assert img.dtype == np.float16 and img.shape == (133, H, W) and img.flags['C_CONTIGUOUS']
+    assert img.dtype == np.float16 and img.shape == (133, H, W) and img.flags['C_CONTIGUOUS'] and not isinstance(img, np.memmap)
 
 
 def test_dataset_cache_asserts_when_missing(synthetic_root, tmp_path):

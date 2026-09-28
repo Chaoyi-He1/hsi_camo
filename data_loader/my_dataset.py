@@ -243,16 +243,24 @@ class HyperCOD_data(Dataset.Dataset):
         disk as [n_bands, H, W]. cache_dir None: read directly from the .mat (HDF5) file, opened per call so
         DataLoader workers stay independent; h5py layout is [B, W, H], so W is indexed with w0:w0+cw and H
         with h0:h0+ch.
-        Returns [n_bands, cw, ch]: float32 from the .mat; from the cache a zero-copy float16 memmap view when
-        out_dtype is float16 (the hot path: a full 133x1680x1240 frame is 0.55 GB, so no fp32 upcast and no
-        transpose pass in the DataLoader workers), otherwise a float32 copy in the same memory order
-        (astype(order='K')), so the final [C, cw, ch] -> [C, ch, cw] transpose in __getitem__ is free.
+        Returns [n_bands, cw, ch]: float32 from the .mat; from the cache a zero-copy float16 view when out_dtype
+        is float16 (the hot path: a full 133x1680x1240 frame is 0.55 GB, so no fp32 upcast and no transpose pass
+        in the DataLoader workers; a full frame is read() into memory, a crop is sliced from the memmap),
+        otherwise a float32 copy in the same memory order (astype(order='K')), so the final
+        [C, cw, ch] -> [C, ch, cw] transpose in __getitem__ is free.
         '''
         if self.cache_dir is not None:
             from data_loader.cube_cache import cache_path
             p = cache_path(self.cache_dir, self.split, name)
             assert os.path.exists(p), f"cache file {p} missing; build it with: python -m data_loader.cube_cache --data_path '{self.data_path}' --split {self.split}"
-            arr = np.load(p, mmap_mode='r')                               # [n_bands, H, W] fp16
+            if (h0, w0, ch, cw) == (0, 0, self.H, self.W):
+                # full frame: one sequential read() into memory. Inside a training process, mmap page faults on
+                # cold frames ran 3-5x slower than the disk (4 workers: ~110 MB/s vs ~400-500 MB/s aggregate).
+                with open(p, 'rb') as f:
+                    os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_SEQUENTIAL)
+                    arr = np.load(f)                                         # [n_bands, H, W] fp16, writable
+            else:
+                arr = np.load(p, mmap_mode='r')                               # crop: slice the memmap
             assert arr.shape == (self.n_bands, self.H, self.W) and arr.dtype == np.float16, \
                 f"cache {p} has {arr.shape} {arr.dtype}, expected ({self.n_bands}, {self.H}, {self.W}) float16"
             view = arr[:, h0:h0 + ch, w0:w0 + cw].transpose(0, 2, 1)   # lazy [n_bands, cw, ch] like the h5 path
@@ -329,7 +337,7 @@ def scale_block(blk, scale):
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', UserWarning)   # "array is not writable": nothing writes through it
             t = torch.from_numpy(blk)
-        return torch.div(t, float(scale)).numpy()
+        return (t.div_(float(scale)) if blk.flags.writeable else torch.div(t, float(scale))).numpy()   # in place when we own it
     return blk / np.float32(scale)
 
 
