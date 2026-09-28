@@ -3,6 +3,8 @@ Export candidate camouflage regions (ROIs) from a trained detector for the Stage
   python main_det_rois.py --session B --resume weights/det_B/model_best --split train
   python main_det_rois.py --session B --resume weights/det_B/model_best --split test
 Writes results/det/rois_<split>.json: {name: {"rois": [[x1,y1,x2,y2,conf],...], "boxes": [...], "gt_boxes": [...]}}
+The exported operating point is cfg/det.yaml's roi_conf (0.25) and roi_topk (5) -- the same subset evaluate()
+reports its *_op metrics on -- expanded by roi_margin/roi_min and clipped. --max-rois overrides roi_topk.
 """
 import os
 if "RANK" not in os.environ and "CUDA_VISIBLE_DEVICES" not in os.environ:
