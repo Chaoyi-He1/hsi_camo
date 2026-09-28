@@ -30,8 +30,8 @@ def test_weight_vector_softmax_scaling_and_ranking():
     w = fb.weights
     assert torch.isclose(w.sum(), torch.tensor(5.0)) and (w > 0).all()
     assert fb.ranking().tolist()[0] == 1 and fb.ranking().tolist()[-1] == 2
-    assert 0.0 < float(fb.entropy()) < 1.0
-    assert float(FilterBank(R, np.zeros(5), np.ones(5), init_logits=np.zeros(5)).entropy()) == pytest.approx(1.0)
+    assert 0.0 < fb.entropy().item() < 1.0
+    assert FilterBank(R, np.zeros(5), np.ones(5), init_logits=np.zeros(5)).entropy().item() == pytest.approx(1.0)
     x = torch.randn(2, 133, 4, 6)
     y = fb(x)
     assert y.shape == (2, 5, 4, 6)

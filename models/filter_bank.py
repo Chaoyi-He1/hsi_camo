@@ -21,7 +21,7 @@ class FilterBank(nn.Module):
         self.register_buffer('R_t', R.t().contiguous())                           # [N, n_bands]
         self.register_buffer('mean', torch.as_tensor(np.asarray(channel_mean), dtype=torch.float32).view(1, -1, 1, 1))
         self.register_buffer('std', torch.as_tensor(np.asarray(channel_std), dtype=torch.float32).view(1, -1, 1, 1))
-        assert (self.std > 0).all(), "channel_std must be positive"
+        assert (self.std > 0).all(), f"channel_std must be positive, got min {float(self.std.min()):.3g}"
         self.n_channels = R.shape[1]
         self.weight_vector = weight_vector
         if weight_vector:
@@ -36,7 +36,7 @@ class FilterBank(nn.Module):
         return self.n_channels * F.softmax(self.theta, dim=0)                       # [N], mean 1
 
     def entropy(self):
-        if not self.weight_vector:
+        if not self.weight_vector or self.n_channels < 2:
             return torch.zeros((), device=self.R_t.device)
         p = F.softmax(self.theta, dim=0)
         return -(p * torch.log(p + 1e-12)).sum() / math.log(self.n_channels)
