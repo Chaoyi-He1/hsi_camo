@@ -25,14 +25,14 @@ class HyperCOD_data(Dataset.Dataset):
         super(HyperCOD_data, self).__init__()
         self.data_path = data_path
         self.split = split  # 'train' or 'test'
-        self.use_filter = use_filter  # True: simulated EC detector channels, False: raw 200 bands
+        self.use_filter = use_filter  # True: simulated EC detector channels, False: the raw cube bands inside band_range
         self.filter_path = filter_path if filter_path is not None else os.path.join(data_path, 'EC_filterV3.mat')
         self.num_filters = num_filters
         self.filter_select = filter_select
         self.filter_voltages = filter_voltages
         self.crop_size = crop_size  # training crop at native resolution, 0 means full frame
         self.obj_crop_prob = obj_crop_prob  # probability that a training crop is placed to contain the object
-        # normalisation layers: 'p99' = per-scene scalar (cube / (intensity_p99 / 200)),
+        # normalisation layers: 'p99' = per-scene scalar (cube / (intensity_p99 / n_bands)),
         # 'p99z' = p99 followed by per-channel standardisation with training band statistics
         self.norm = norm  # 'none', 'p99' or 'p99z'
         # 'l1' divides every selected filter column by its L1 norm, so a channel is a weighted average of bands
@@ -127,7 +127,7 @@ class HyperCOD_data(Dataset.Dataset):
         '''
         Load the EC detector response [401 wavelengths, 351 voltages], resample it onto the cube band
         centres (zero outside 400-800 nm) and keep the selected voltage columns.
-        Result: self.sensor_R_matrix [C, N], C = 200 bands, N = number of selected voltages.
+        Result: self.sensor_R_matrix [C, N], C = n_bands (the cube bands inside band_range), N = selected voltages.
         The columns are already peak-normalized to |max| = 1 and contain negative lobes, so unlike the
         previous project there is NO per-column min-max normalization here (it would destroy the signs).
         '''
@@ -152,7 +152,7 @@ class HyperCOD_data(Dataset.Dataset):
     def load_intensity_scale(self):
         '''
         Per-sample scale = p99 of the band sum inside the window / n_bands. For the full 400-1000 nm window this is
-        intensity_p99_valid / 200 from the dataset's csv; for a narrower window the 99th percentile of the windowed
+        intensity_p99_valid / N_BANDS (200) from the csv; for a narrower window the 99th percentile of the windowed
         band sum is computed once per sample from the cubes and cached next to the original csv.
         '''
         if self.n_bands == N_BANDS:
@@ -378,7 +378,7 @@ def add_dataset_args(parser):
     parser.add_argument('--filter_path', type=str, default=None,
                         help='EC sensor response .mat, default <data_path>/EC_filterV3.mat')
     parser.add_argument('--use_filter', action='store_true',
-                        help='feed the model the simulated EC detector channels instead of the raw 200 bands '
+                        help='feed the model the simulated EC detector channels instead of the raw cube bands '
                              '(CLI default off; the HyperCOD_data constructor defaults to use_filter=True)')
     parser.add_argument('--num_filters', type=int, default=30,
                         help='number of voltage channels for filter_select uniform / osp')
@@ -391,7 +391,7 @@ def add_dataset_args(parser):
     parser.add_argument('--obj_crop_prob', type=float, default=0.5,
                         help='probability that a training crop is placed to contain the object')
     parser.add_argument('--norm', type=str, default='p99z', choices=['none', 'p99', 'p99z'],
-                        help='p99: per-sample scaling by intensity p99 / 200 from intensity_p99_summary.csv; '
+                        help='p99: per-sample scaling by intensity p99 / n_bands from intensity_p99_summary.csv; '
                              'p99z: p99 followed by per-channel standardisation with training band statistics '
                              '(band_stats_train.npz, built on first use)')
     parser.add_argument('--band_range', type=float, nargs=2, default=[400.0, 800.0],

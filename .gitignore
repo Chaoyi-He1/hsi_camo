@@ -9,5 +9,4 @@ results/
 weights/
 runs/
 wandb/
-results/
 *.pt

@@ -60,7 +60,7 @@ class TrainLogger(object):
 
     def scalars(self, values, step, prefix=''):
         for k, v in values.items():
-            if v is not None and not (isinstance(v, float) and np.isnan(v)):
+            if v is not None and not (isinstance(v, (float, np.floating)) and np.isnan(v)):   # np.float32 too
                 self.scalar(prefix + k, v, step)
 
     def histogram(self, tag, values, step):

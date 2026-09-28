@@ -29,7 +29,9 @@ def read_npy_direct(path):
         if e.errno == errno.EINVAL:
             return np.load(path)
         raise
-    buf = mmap.mmap(-1, length)                           # anonymous mapping: page-aligned address
+    # private anonymous mapping: page-aligned address, and plain anonymous memory rather than the shmem-backed
+    # (page-cache LRU) pages Python's MAP_SHARED default would hand back, which is what O_DIRECT is avoiding here
+    buf = mmap.mmap(-1, length, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
     view = memoryview(buf)
     try:
         got = 0
@@ -76,7 +78,8 @@ def build_cube_cache(data_path, split, cache_dir=None, band_range=(400.0, 800.0)
     if todo:
         loader = torch.utils.data.DataLoader(torch.utils.data.Subset(ds, todo), batch_size=1, shuffle=False,
                                              num_workers=num_workers, collate_fn=image_collate_fn)
-        for k, (img, _, name) in enumerate(loader):                       # img [1, n_bands, H, W] fp16
+        for k, (img, _, name) in enumerate(loader):                       # img [1, n_bands, H, W]; image_collate_fn
+                                                                          # upcasts to fp32, the .astype below re-rounds
             out = cache_path(cache_dir, split, name[0])
             np.save(out, img[0].numpy().astype(np.float16))
             written.append(out)

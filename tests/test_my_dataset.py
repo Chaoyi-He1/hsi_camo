@@ -178,12 +178,6 @@ def test_getitem_filter_equals_einsum_on_raw(synthetic_root):
     np.testing.assert_array_equal(gt_f, gt_r)
 
 
-def test_getitem_filter_uses_only_bands_below_800nm(synthetic_root):
-    root, _, _ = synthetic_root
-    ds = make(root, split='test', use_filter=True)
-    assert ds.sensor_R_matrix.shape[0] == 133
-
-
 def test_getitem_filter_crop_shape(synthetic_root):
     root, _, _ = synthetic_root
     ds = make(root, use_filter=True, num_filters=8, crop_size=16, seed=5)

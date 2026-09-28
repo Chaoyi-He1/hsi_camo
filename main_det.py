@@ -9,6 +9,7 @@ Evaluate a checkpoint on val + test:
   python main_det.py --session B --resume weights/det_B/model_best --eval
 DDP (2 GPUs):
   torchrun --nproc_per_node=2 main_det.py --session A --name det_A --output-dir weights/det_A
+Without torchrun this script pins CUDA_VISIBLE_DEVICES=0 (see the top of the file) unless it is already set.
 Smoke run on a few cached frames:
   python main_det.py --session A --limit 4 --epochs 1 --name smoke --output-dir weights/smoke --no-wandb
 """
@@ -46,7 +47,7 @@ torch.multiprocessing.set_sharing_strategy('file_system')
 
 def get_args_parser():
     parser = argparse.ArgumentParser('EC-filter YOLO26 camouflage detector (Stage 1)', add_help=False)
-    parser.add_argument('--device', default='cuda', help='device id (i.e. 0 or 0,1 or cpu)')
+    parser.add_argument('--device', default='cuda', help="'cuda', 'cuda:N' or 'cpu' (a bare digit is not a torch device string)")
     parser.add_argument('--name', default='', help='run name; results_<name>.txt, runs/<name>, W&B run name')
     parser.add_argument('--seed', default=42, type=int)
     parser.add_argument('--eval', action='store_true', help='only evaluate --resume on val + test')
@@ -79,7 +80,7 @@ def get_args_parser():
     parser.add_argument('--accumulate', default=4, type=int, help='gradient accumulation steps')
     parser.add_argument('--num_workers', default=4, type=int)
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N')
-    parser.add_argument('--amp', action='store_false', help='disable mixed precision (on by default)')
+    parser.add_argument('--amp', action='store_false', help='disable mixed precision; ignored on CUDA, where fp16 is required to fit the response tensor')
     parser.add_argument('--no-flip', action='store_true', help='disable random h/v flips')
     parser.add_argument('--save_every', default=10, type=int)
     # eval overrides

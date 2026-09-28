@@ -1,6 +1,5 @@
 import json
 import numpy as np
-import pytest
 import torch
 
 from data_loader.boxes import boxes_from_mask, boxes_to_yolo, yolo_to_xyxy, flip_boxes, expand_box, det_collate_fn
@@ -59,6 +58,7 @@ def test_make_and_load_det_splits(synthetic_root, tmp_path):
     p = tmp_path / 'det_val_ids.json'
     train_ids, val_ids = make_det_splits(str(root), n_val=1, seed=0, path=str(p))
     assert sorted(train_ids + val_ids) == ['10', '3'] and len(val_ids) == 1
-    assert json.load(open(p))['val_ids'] == val_ids
+    with open(p) as f:
+        assert json.load(f)['val_ids'] == val_ids
     assert load_det_ids(str(root), path=str(p)) == (train_ids, val_ids)
     assert make_det_splits(str(root), n_val=1, seed=0, path=str(p)) == (train_ids, val_ids)   # idempotent

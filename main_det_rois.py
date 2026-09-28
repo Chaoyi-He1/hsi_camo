@@ -10,7 +10,6 @@ if "RANK" not in os.environ and "CUDA_VISIBLE_DEVICES" not in os.environ:
 import argparse
 import json
 from functools import partial
-import numpy as np
 import torch
 
 import util.misc as utils

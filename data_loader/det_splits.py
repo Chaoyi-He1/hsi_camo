@@ -26,7 +26,8 @@ def make_det_splits(data_path, n_val=28, seed=0, path=None):
 def load_det_ids(data_path, path=None):
     path = path or SPLIT_PATH
     assert os.path.exists(path), f"split file {path} missing; run make_det_splits"
-    val_ids = json.load(open(path))['val_ids']
+    with open(path) as f:
+        val_ids = json.load(f)['val_ids']
     ids = _train_ids(data_path)
     assert all(v in ids for v in val_ids), f"val ids not in {data_path}/train: {[v for v in val_ids if v not in ids]}"
     return [i for i in ids if i not in val_ids], val_ids

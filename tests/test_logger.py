@@ -1,7 +1,6 @@
 import os
 import types
 import numpy as np
-import pytest
 
 from util.logger import TrainLogger
 

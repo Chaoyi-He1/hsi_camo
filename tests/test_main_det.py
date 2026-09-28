@@ -1,7 +1,6 @@
 import json
 import os
 import torch
-import pytest
 
 import main_det
 from models.ec_yolo import ECYolo
@@ -39,7 +38,9 @@ def test_sessions_a_then_b_and_eval(synthetic_root, tmp_path, monkeypatch):
     main_det.main(_args(root, tmp_path, **{'--session': 'A', '--name': 'tA', '--output-dir': str(out_a), '--top_k': '3'}))
     assert (out_a / 'model_best').exists() and (out_a / 'model_0').exists()
     assert (out_a / 'gate_ranking.csv').read_text().splitlines()[0] == 'rank,index,voltage,weight'
-    top = json.load(open(out_a / 'top_k.json')); assert len(top['indices']) == 3 and len(top['voltages']) == 3
+    with open(out_a / 'top_k.json') as f:
+        top = json.load(f)
+    assert len(top['indices']) == 3 and len(top['voltages']) == 3
 
     lines = (out_a / 'results_tA.txt').read_text().strip().splitlines()
     rec = json.loads(lines[-1]); assert rec['epoch'] == 0 and 'val' in rec and 'coverage_recall99_raw' in rec['val']

@@ -1,7 +1,6 @@
 import os
 import numpy as np
 import pytest
-import torch
 
 from data_loader.cube_cache import build_cube_cache, cache_path, default_cache_dir, read_npy_direct
 from data_loader.my_dataset import HyperCOD_data

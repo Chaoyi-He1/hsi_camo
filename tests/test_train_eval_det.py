@@ -2,7 +2,6 @@ import types
 from functools import partial
 import numpy as np
 import torch
-import pytest
 
 from train_eval.train_eval_det import random_flips, train_one_epoch, evaluate, false_colour, draw_boxes
 from tests.test_ec_yolo import _tiny
