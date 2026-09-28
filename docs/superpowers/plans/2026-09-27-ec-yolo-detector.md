@@ -456,7 +456,7 @@ After `self.img_name = sorted(names, key=int)`:
 - Create: `data_loader/boxes.py`, `data_loader/det_splits.py`, `tests/test_boxes.py`
 
 **Interfaces:**
-- Produces: `boxes_from_mask(mask, min_area=100, return_labels=False) -> boxes [K,4] float32 xyxy (x2,y2 exclusive) | (boxes, labels [H,W] int32, ids list[int])`; `boxes_to_yolo(boxes, H, W) -> [K,4] float32 normalised cx,cy,w,h`; `yolo_to_xyxy(b, H, W)`; `flip_boxes(boxes, H, W, horizontal, vertical)`; `expand_box(box, margin=1.5, min_size=256, H, W)`; `det_collate_fn(batch) -> dict(img [B,C,H,W] tensor (dtype of the dataset), masks list of bool [H,W], batch_idx [ΣK], cls [ΣK,1], bboxes [ΣK,4], boxes_xyxy list of [K,4], names list[str])`; `make_det_splits(data_path, n_val=28, seed=0, path=None) -> (train_ids, val_ids)` writing `data_loader/splits/det_val_ids.json`; `load_det_ids(data_path, path=None) -> (train_ids, val_ids)`.
+- Produces: `boxes_from_mask(mask, min_area=100, return_labels=False) -> boxes [K,4] float32 xyxy (x2,y2 exclusive) | (boxes, labels [H,W] int32, ids list[int])` — **the default 100 px is the real-data floor that drops JPEG specks and must not be lowered; the 36-px fixture object is handled by passing `min_area=10` in tests**; `boxes_to_yolo(boxes, H, W) -> [K,4] float32 normalised cx,cy,w,h`; `yolo_to_xyxy(b, H, W)`; `flip_boxes(boxes, H, W, horizontal, vertical)`; `expand_box(box, margin=1.5, min_size=256, H, W)`; `det_collate_fn(batch, min_area=100) -> dict(img [B,C,H,W] tensor (dtype of the dataset), masks list of bool [H,W], batch_idx [ΣK], cls [ΣK,1], bboxes [ΣK,4], boxes_xyxy list of [K,4], names list[str])`; `make_det_splits(data_path, n_val=28, seed=0, path=None) -> (train_ids, val_ids)` writing `data_loader/splits/det_val_ids.json`; `load_det_ids(data_path, path=None) -> (train_ids, val_ids)`.
 
 - [ ] **Step 1: Failing tests** — `tests/test_boxes.py`:
 
@@ -473,11 +473,12 @@ from tests.conftest import H, W, OBJ_SLICE
 
 
 def test_boxes_from_mask_single_and_specks():
-    m = np.zeros((H, W), bool); m[OBJ_SLICE] = True; m[40, 5] = True      # 6x6 object + 1-px speck
-    b = boxes_from_mask(m)
+    m = np.zeros((H, W), bool); m[OBJ_SLICE] = True; m[40, 5] = True      # 6x6 object (36 px) + 1-px speck
+    b = boxes_from_mask(m, min_area=10)                                      # the fixture object is smaller than the real-data default of 100 px
     np.testing.assert_array_equal(b, [[20, 10, 26, 16]]); assert b.dtype == np.float32
-    b2, labels, ids = boxes_from_mask(m, return_labels=True)
+    b2, labels, ids = boxes_from_mask(m, min_area=10, return_labels=True)
     assert labels.shape == (H, W) and ids == [1] and (labels == 1).sum() == 36
+    assert boxes_from_mask(m).shape == (0, 4)                                # default min_area=100 drops the 36-px fixture object
     assert boxes_from_mask(np.zeros((H, W), bool)).shape == (0, 4)
 
 
@@ -508,7 +509,7 @@ def test_expand_box_margin_min_size_and_clipping():
 def test_det_collate_fn_builds_yolo_batch(synthetic_root):
     root, _, _ = synthetic_root
     ds = HyperCOD_data(str(root), split='train', use_filter=False, norm='p99', crop_size=0, out_dtype='float16', filter_norm='none')
-    batch = det_collate_fn([ds[0], ds[1]])
+    batch = det_collate_fn([ds[0], ds[1]], min_area=10)                       # fixture objects are 36 px
     assert batch['img'].shape == (2, 133, H, W) and batch['img'].dtype == torch.float16
     assert batch['batch_idx'].tolist() == [0.0, 1.0] and batch['cls'].shape == (2, 1) and batch['bboxes'].shape == (2, 4)
     np.testing.assert_allclose(batch['bboxes'][0].numpy(), [23 / W, 13 / H, 6 / W, 6 / H], rtol=1e-6)
@@ -585,10 +586,11 @@ def expand_box(box, margin, min_size, H, W):
     return np.array([max(0.0, cx - w / 2), max(0.0, cy - h / 2), min(float(W), cx + w / 2), min(float(H), cy + h / 2)], dtype=np.float32)
 
 
-def det_collate_fn(batch):
+def det_collate_fn(batch, min_area=100):
     '''
     HyperCOD_data (img [C, H, W], gt [1, H, W], name) tuples -> the batch dict ultralytics' model.loss reads
     (img, batch_idx, cls, bboxes normalised cx,cy,w,h) plus the masks and pixel boxes for the metrics.
+    Use functools.partial(det_collate_fn, min_area=...) as the DataLoader collate_fn to change the box floor.
     '''
     imgs, gts, names = list(zip(*batch))
     img = torch.from_numpy(np.stack(imgs, axis=0))                        # [B, C, H, W], dataset dtype
@@ -596,7 +598,7 @@ def det_collate_fn(batch):
     masks, boxes_xyxy, batch_idx, bboxes = [], [], [], []
     for i, gt in enumerate(gts):
         m = gt[0] > 0.5                                                   # [H, W] bool
-        b = boxes_from_mask(m)                                            # [K, 4]
+        b = boxes_from_mask(m, min_area=min_area)                         # [K, 4]
         masks.append(m); boxes_xyxy.append(b)
         batch_idx.append(np.full(len(b), i, dtype=np.float32)); bboxes.append(boxes_to_yolo(b, H, W))
     batch_idx = torch.from_numpy(np.concatenate(batch_idx)) if batch_idx else torch.zeros(0)
@@ -1482,12 +1484,13 @@ def select_score(summary):
 
 **Interfaces:**
 - Consumes: `ECYolo.loss/forward/end_epoch`, `decode_predictions` (Task 6); `BoxMetrics`, `select_score` (Task 7); `util.misc.MetricLogger, SmoothedValue`; `TrainLogger` (Task 4); `expand_box` (Task 3).
-- Produces: `random_flips(img [B,C,H,W], bboxes [ΣK,4], batch_idx [ΣK], p=0.5, generator=None) -> (img, bboxes, flags list[(h, v)])`; `train_one_epoch(model, data_loader, optimizer, device, epoch, max_norm=10.0, scaler=None, accumulate=1, logger=None, flip=True, print_freq=10) -> dict of epoch means`; `evaluate(model, data_loader, device, conf_thres=0.001, iou_thres=0.6, max_det=300, roi_margin=1.5, roi_min=256, logger=None, epoch=0, tag='val', n_images_log=4, amp=True) -> summary dict`; `false_colour(y [N,H,W] tensor) -> uint8 [H,W,3]`; `draw_boxes(img_uint8, boxes, color, width=3, dashed=False) -> uint8`.
+- Produces: `random_flips(img [B,C,H,W], bboxes [ΣK,4], batch_idx [ΣK], p=0.5, generator=None) -> (img, bboxes, flags list[(h, v)])`; `train_one_epoch(model, data_loader, optimizer, device, epoch, max_norm=10.0, scaler=None, accumulate=1, logger=None, flip=True, print_freq=10) -> dict of epoch means`; `evaluate(model, data_loader, device, conf_thres=0.001, iou_thres=0.6, max_det=300, roi_margin=1.5, roi_min=256, min_area=100, logger=None, epoch=0, tag='val', n_images_log=4, amp=True) -> summary dict` (`min_area` = GT component floor, 100 px on real data, 10 on the fixture); `false_colour(y [N,H,W] tensor) -> uint8 [H,W,3]`; `draw_boxes(img_uint8, boxes, color, width=3, dashed=False) -> uint8`.
 
 - [ ] **Step 1: Failing tests** — `tests/test_train_eval_det.py`:
 
 ```python
 import types
+from functools import partial
 import numpy as np
 import torch
 import pytest
@@ -1502,7 +1505,7 @@ from tests.conftest import H, W
 
 def _loader(root, split='train'):
     ds = HyperCOD_data(str(root), split=split, use_filter=False, norm='p99', crop_size=0, out_dtype='float16', filter_norm='none')
-    return torch.utils.data.DataLoader(ds, batch_size=2, shuffle=False, num_workers=0, collate_fn=det_collate_fn)
+    return torch.utils.data.DataLoader(ds, batch_size=2, shuffle=False, num_workers=0, collate_fn=partial(det_collate_fn, min_area=10))
 
 
 def test_random_flips_move_boxes_with_pixels():
@@ -1524,7 +1527,7 @@ def test_train_and_evaluate_one_epoch_on_cpu(synthetic_root, tmp_path):
     logger = TrainLogger(types.SimpleNamespace(name='t', wandb=False, runs_dir=str(tmp_path / 'runs'), rank=0), cfg={})
     stats = train_one_epoch(model, _loader(root), opt, torch.device('cpu'), epoch=0, scaler=None, accumulate=2, logger=logger, print_freq=1)
     assert {'loss', 'box_loss', 'cls_loss', 'gate_entropy', 'contain_loss', 'lr'} <= set(stats) and np.isfinite(stats['loss'])
-    summary = evaluate(model, _loader(root, 'test'), torch.device('cpu'), roi_margin=1.5, roi_min=0, logger=logger, epoch=0, tag='val', amp=False)
+    summary = evaluate(model, _loader(root, 'test'), torch.device('cpu'), roi_margin=1.5, roi_min=0, min_area=10, logger=logger, epoch=0, tag='val', amp=False)
     for k in ['recall50', 'ap50', 'coverage_raw', 'coverage_recall99_raw', 'coverage_roi', 'tightness', 'center_offset', 'dets_per_image']:
         assert k in summary
     assert summary['n_images'] == 1 and summary['n_gt'] == 1
@@ -1633,9 +1636,9 @@ def draw_boxes(img_uint8, boxes, color, width=3, dashed=False):
 
 @torch.no_grad()
 def evaluate(model, data_loader, device, conf_thres=0.001, iou_thres=0.6, max_det=300, roi_margin=1.5, roi_min=256,
-             logger=None, epoch=0, tag='val', n_images_log=4, amp=True):
+             min_area=100, logger=None, epoch=0, tag='val', n_images_log=4, amp=True):
     model.eval()
-    metrics = BoxMetrics(roi_margin=roi_margin, roi_min=roi_min)
+    metrics = BoxMetrics(roi_margin=roi_margin, roi_min=roi_min, min_area=min_area)
     metric_logger = MetricLogger(delimiter="; ")
     logged = 0
     for batch in metric_logger.log_every(data_loader, 10, f'Eval {tag}:'):
@@ -1652,7 +1655,7 @@ def evaluate(model, data_loader, device, conf_thres=0.001, iou_thres=0.6, max_de
                 with torch.autocast(device.type, enabled=amp and device.type == 'cuda'):
                     y = model.filter_bank(model.pad_to_stride(img[b:b + 1])[0])[0, :, :H, :W]
                 pic = false_colour(y)
-                pic = draw_boxes(pic, boxes_from_mask(mask), (0, 255, 0))
+                pic = draw_boxes(pic, boxes_from_mask(mask, min_area=min_area), (0, 255, 0))
                 top = d[d[:, 4] >= 0.25][:5]
                 pic = draw_boxes(pic, top[:, :4], (255, 0, 0))
                 pic = draw_boxes(pic, [expand_box(p, roi_margin, roi_min, H, W) for p in top[:, :4]], (255, 255, 0), dashed=True)
@@ -1690,6 +1693,7 @@ iou_thres: 0.6                # NMS IoU
 max_det: 300
 roi_margin: 1.5               # Stage-2 crop = box grown 1.5x about its centre ...
 roi_min: 256                  # ... and at least 256 px per side
+min_area: 100                 # GT mask components below this many pixels are JPEG specks, not objects (tests use 10)
 ```
 
 - [ ] **Step 2: Failing test** — `tests/test_main_det.py`:
@@ -1710,7 +1714,7 @@ def _args(root, tmp_path, **kw):
     argv = ['--data-path', str(root), '--cache-dir', default_cache_dir(str(root)), '--split-file', str(tmp_path / 'val.json'),
             '--yolo-variant', 'yolo26n', '--pretrained', 'none', '--filter-select', 'uniform', '--num-filters', '6',
             '--epochs', '1', '--batch_size', '2', '--num_workers', '0', '--device', 'cpu', '--amp', '--no-wandb',
-            '--runs-dir', str(tmp_path / 'runs'), '--roi-min', '0', '--save_every', '1']
+            '--runs-dir', str(tmp_path / 'runs'), '--roi-min', '0', '--min-area', '10', '--save_every', '1']
     for k, v in kw.items():
         argv += [k] + ([] if v is None else [str(v)])
     parser = main_det.get_args_parser()
@@ -1772,6 +1776,7 @@ import json
 import math
 import random
 import time
+from functools import partial
 
 import yaml
 import numpy as np
@@ -1833,6 +1838,7 @@ def get_args_parser():
     # eval overrides
     parser.add_argument('--conf-thres', type=float, default=None); parser.add_argument('--iou-thres', type=float, default=None)
     parser.add_argument('--roi-margin', type=float, default=None); parser.add_argument('--roi-min', type=float, default=None)
+    parser.add_argument('--min-area', type=int, default=None, help='GT component floor in px (cfg: 100; fixture tests use 10)')
     # logging
     parser.add_argument('--output-dir', default='weights/det_A')
     parser.add_argument('--runs-dir', default='runs')
@@ -1847,7 +1853,7 @@ def get_args_parser():
 def load_cfg(args):
     with open(args.hpy) as f:
         cfg = yaml.safe_load(f)
-    for k in ['gate_entropy_weight', 'contain_weight', 'conf_thres', 'iou_thres', 'roi_margin', 'roi_min']:
+    for k in ['gate_entropy_weight', 'contain_weight', 'conf_thres', 'iou_thres', 'roi_margin', 'roi_min', 'min_area']:
         if getattr(args, k) is None:
             setattr(args, k, cfg[k])
     args.max_norm = cfg.get('max_norm', 10.0); args.max_det = cfg.get('max_det', 300)
@@ -1922,8 +1928,9 @@ def main(args):
         sampler_train = Custom_DistributedSampler(dataset_train, shuffle=True)
     else:
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
+    collate = partial(det_collate_fn, min_area=args.min_area)
     mk = lambda ds, sampler, bs, shuffle: torch.utils.data.DataLoader(ds, batch_size=bs, sampler=sampler, shuffle=shuffle, num_workers=args.num_workers,
-                                                                     collate_fn=det_collate_fn, pin_memory=device.type == 'cuda', drop_last=False)
+                                                                     collate_fn=collate, pin_memory=device.type == 'cuda', drop_last=False)
     loader_train = mk(dataset_train, sampler_train, args.batch_size, False)
     loader_val, loader_test = mk(dataset_val, None, 1, False), mk(dataset_test, None, 1, False)
 
@@ -1946,7 +1953,8 @@ def main(args):
             scaler.load_state_dict(ckpt['scaler'])
         args.start_epoch = ckpt['epoch'] + 1
 
-    eval_kw = dict(conf_thres=args.conf_thres, iou_thres=args.iou_thres, max_det=args.max_det, roi_margin=args.roi_margin, roi_min=args.roi_min, amp=scaler is not None)
+    eval_kw = dict(conf_thres=args.conf_thres, iou_thres=args.iou_thres, max_det=args.max_det, roi_margin=args.roi_margin, roi_min=args.roi_min,
+                   min_area=args.min_area, amp=scaler is not None)
     results_path = os.path.join(args.output_dir, f'results_{args.name}.txt')
     if args.eval:
         val = evaluate(model_without_ddp, loader_val, device, logger=logger, epoch=args.start_epoch, tag='val', **eval_kw)
@@ -2034,7 +2042,7 @@ def test_export_rois_json(synthetic_root, tmp_path, monkeypatch):
     args = main_det_rois.get_args_parser().parse_args(['--data-path', str(root), '--cache-dir', str(root / 'cache_fp16'),
         '--split-file', str(tmp_path / 'val.json'), '--yolo-variant', 'yolo26n', '--pretrained', 'none', '--filter-select', 'uniform',
         '--num-filters', '6', '--device', 'cpu', '--amp', '--no-wandb', '--session', 'A', '--resume', str(out_a / 'model_best'),
-        '--split', 'test', '--out-dir', str(tmp_path / 'rois'), '--conf-thres', '0.0', '--max-rois', '2', '--roi-min', '0', '--num_workers', '0'])
+        '--split', 'test', '--out-dir', str(tmp_path / 'rois'), '--conf-thres', '0.0', '--max-rois', '2', '--roi-min', '0', '--min-area', '10', '--num_workers', '0'])
     path = main_det_rois.main(args)
     data = json.load(open(path))
     assert set(data) == {'7'} and {'rois', 'boxes', 'gt_boxes'} <= set(data['7']) and len(data['7']['rois']) <= 2
@@ -2057,6 +2065,7 @@ if "RANK" not in os.environ and "CUDA_VISIBLE_DEVICES" not in os.environ:
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import argparse
 import json
+from functools import partial
 import numpy as np
 import torch
 
@@ -2087,7 +2096,8 @@ def main(args):
               band_range=tuple(args.band_range), filter_path=args.filter_path, num_filters=args.num_filters,
               filter_select=args.filter_select, filter_voltages=args.filter_voltages, filter_norm='l1')
     dataset = HyperCOD_data(split=args.split, **kw)
-    loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=args.num_workers, collate_fn=det_collate_fn)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=args.num_workers,
+                                         collate_fn=partial(det_collate_fn, min_area=args.min_area))
     ckpt = torch.load(args.resume, map_location='cpu', weights_only=False)
     model = main_det.build_model(args, dataset_train, ckpt).to(device).eval()
     out, covered, n_gt = {}, 0, 0
@@ -2099,7 +2109,7 @@ def main(args):
         dets = dets[np.argsort(-dets[:, 4])][:args.max_rois]
         dets[:, [0, 2]] = dets[:, [0, 2]].clip(0, W); dets[:, [1, 3]] = dets[:, [1, 3]].clip(0, H)
         rois = [[*expand_box(d[:4], args.roi_margin, args.roi_min, H, W).tolist(), float(d[4])] for d in dets]
-        gt_boxes, labels, ids = boxes_from_mask(batch['masks'][0], return_labels=True)
+        gt_boxes, labels, ids = boxes_from_mask(batch['masks'][0], min_area=args.min_area, return_labels=True)
         for gb, cid in zip(gt_boxes, ids):
             n_gt += 1; covered += any(mask_coverage(labels == cid, r[:4]) >= 0.99 for r in rois)
         out[batch['names'][0]] = {'rois': rois, 'boxes': [[float(v) for v in d[:5]] for d in dets], 'gt_boxes': gt_boxes.tolist()}
