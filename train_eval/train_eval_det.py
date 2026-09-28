@@ -64,9 +64,8 @@ def train_one_epoch(model, data_loader, optimizer, device, epoch, max_norm=10.0,
 
 def false_colour(y):
     '''Three channels spread over the response stack -> uint8 RGB (percentile-stretched) for logging.'''
-    y = y.detach().float().cpu()
     idx = [0, y.shape[0] // 2, y.shape[0] - 1] if y.shape[0] >= 3 else [0] * 3
-    rgb = torch.stack([y[i] for i in idx], dim=-1).numpy()
+    rgb = y.detach()[idx].float().cpu().permute(1, 2, 0).numpy()   # pick 3 of N channels first: N=344 at native res is 2.9 GB in fp32
     lo, hi = np.percentile(rgb, 1), np.percentile(rgb, 99)
     return (np.clip((rgb - lo) / max(hi - lo, 1e-6), 0, 1) * 255).astype(np.uint8)
 
