@@ -92,8 +92,10 @@ def test_decode_predictions_returns_xyxy_conf_cls():
     model = _tiny(4, contain_weight=0.0).eval()
     with torch.no_grad():
         out = model(torch.rand(2, 133, 64, 64))
+    assert model.yolo.end2end and out[0].ndim == 3 and out[0].shape[-1] == 6          # one-to-one head, no NMS
     dets = decode_predictions(out, conf_thres=0.0, iou_thres=0.6, max_det=10)
     assert len(dets) == 2 and all(d.shape[1] == 6 and d.dtype == np.float32 and len(d) <= 10 for d in dets)
+    assert all(np.all(d[:, 2] >= d[:, 0]) and np.all(d[:, 3] >= d[:, 1]) for d in dets)  # xyxy
 
 
 def test_build_ec_yolo_from_args_and_dataset(synthetic_root):

@@ -51,6 +51,10 @@ def build_detection_model(variant, n_channels, pretrained_path=None, nc=1, epoch
             dm.model[0].conv.weight.data.copy_(adapt_first_conv_weight(sd[FIRST_CONV_KEY], n_channels))
     dm.args = get_cfg()
     dm.args.epochs = int(epochs)
+    # YOLO26 is NMS-free: infer with the one-to-one head ([B, max_det, 6] xyxy/conf/cls), as ultralytics' own
+    # validator does (nms=False). Training is unchanged (E2ELoss supervises both heads). Left off, the model
+    # returns the one-to-many [B, 4+nc, A] and eval falls back to NMS, which times out on native-res frames.
+    dm.end2end = True
     return dm, n_matched, len(own)
 
 

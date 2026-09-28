@@ -3,6 +3,7 @@ import os
 import csv
 import random
 import argparse
+import warnings
 import numpy as np
 import h5py
 import torch
@@ -242,7 +243,10 @@ class HyperCOD_data(Dataset.Dataset):
         disk as [n_bands, H, W]. cache_dir None: read directly from the .mat (HDF5) file, opened per call so
         DataLoader workers stay independent; h5py layout is [B, W, H], so W is indexed with w0:w0+cw and H
         with h0:h0+ch.
-        Returns float32 [n_bands, cw, ch] either way.
+        Returns [n_bands, cw, ch]: float32 from the .mat; from the cache a zero-copy float16 memmap view when
+        out_dtype is float16 (the hot path: a full 133x1680x1240 frame is 0.55 GB, so no fp32 upcast and no
+        transpose pass in the DataLoader workers), otherwise a float32 copy in the same memory order
+        (astype(order='K')), so the final [C, cw, ch] -> [C, ch, cw] transpose in __getitem__ is free.
         '''
         if self.cache_dir is not None:
             from data_loader.cube_cache import cache_path
@@ -251,8 +255,8 @@ class HyperCOD_data(Dataset.Dataset):
             arr = np.load(p, mmap_mode='r')                               # [n_bands, H, W] fp16
             assert arr.shape == (self.n_bands, self.H, self.W) and arr.dtype == np.float16, \
                 f"cache {p} has {arr.shape} {arr.dtype}, expected ({self.n_bands}, {self.H}, {self.W}) float16"
-            blk = np.ascontiguousarray(arr[:, h0:h0 + ch, w0:w0 + cw], dtype=np.float32)   # [n_bands, ch, cw]
-            return np.ascontiguousarray(blk.transpose(0, 2, 1))                            # -> [n_bands, cw, ch] like the h5 path
+            view = arr[:, h0:h0 + ch, w0:w0 + cw].transpose(0, 2, 1)   # lazy [n_bands, cw, ch] like the h5 path
+            return view if self.out_dtype == np.float16 else view.astype(np.float32)   # order='K': layout unchanged
 
         b0, b1 = int(self.band_idx[0]), int(self.band_idx[-1]) + 1
         with h5py.File(os.path.join(self.hsi_path, f'{name}.mat'), 'r') as f:
@@ -291,18 +295,20 @@ class HyperCOD_data(Dataset.Dataset):
         gt = self.load_gt(name)  # [H, W] bool
         h0, w0, ch, cw = self.crop_window(gt)
 
-        blk = self.read_cube_block(name, h0, w0, ch, cw)  # [B, cw, ch] float32
+        blk = self.read_cube_block(name, h0, w0, ch, cw)  # [B, cw, ch], float32 (h5) or float16 view (cache)
         if self.norm in ['p99', 'p99z']:
             # positive per-sample scalar, so scaling before or after the filter is identical
-            blk /= np.float32(self.scale[name])
+            blk = scale_block(blk, self.scale[name])
 
         if self.use_filter:
-            # simulated detector channels: y_n = sum_b R[b, n] * cube[b], done in the h5 layout -> [N, cw, ch]
-            img = np.tensordot(self.sensor_R_matrix.T, blk, axes=(1, 0))
+            # simulated detector channels: y_n = sum_b R[b, n] * cube[b], done in the h5 layout -> [N, cw, ch];
+            # BLAS needs float32 (no-op when blk already is)
+            img = np.tensordot(self.sensor_R_matrix.T, np.asarray(blk, dtype=np.float32), axes=(1, 0))
         else:
             img = blk  # raw bands [B, cw, ch]
 
-        # only the last two axes are swapped: [C, cw, ch] -> [C, ch, cw]; never build [H, W, B] (6 s per crop)
+        # only the last two axes are swapped: [C, cw, ch] -> [C, ch, cw]; never build [H, W, B] (6 s per crop).
+        # cache + float16: img already has [C, ch, cw] memory order, so this is a view, not a copy
         img = np.ascontiguousarray(img.transpose(0, 2, 1), dtype=self.out_dtype)  # [C, ch, cw]
         if self.norm == 'p99z':
             # per-channel standardisation after the (simulated) readout, always done in float32 regardless of
@@ -311,6 +317,20 @@ class HyperCOD_data(Dataset.Dataset):
                    / self.channel_std[:, None, None]).astype(self.out_dtype)  # [C, ch, cw]
         gt = gt[h0:h0 + ch, w0:w0 + cw].astype(np.float32)[None]  # [1, ch, cw]
         return img, gt, name
+
+
+def scale_block(blk, scale):
+    '''
+    blk / scale, out of place, in blk's own dtype. A float16 block (the fp16 cache view, read-only, 0.55 GB per
+    full frame) goes through torch: numpy's half loops are scalar (1.5 s per frame) while torch's are vectorised
+    (0.3 s on one thread) and keep the input's memory order. float32 blocks (the .mat path) stay in numpy.
+    '''
+    if blk.dtype == np.float16:
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)   # "array is not writable": nothing writes through it
+            t = torch.from_numpy(blk)
+        return torch.div(t, float(scale)).numpy()
+    return blk / np.float32(scale)
 
 
 def window_p99_csv_path(data_path, split, band_range):

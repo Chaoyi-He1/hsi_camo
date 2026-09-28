@@ -16,6 +16,7 @@ class TrainLogger(object):
         self.tb = None
         self.wandb_run = None
         self.mode = 'disabled'
+        self._defined = set()            # W&B metric groups whose x-axis has been declared (see _wandb_log)
         if not self.enabled:
             return
         self.tb = SummaryWriter(log_dir=os.path.join(getattr(args, 'runs_dir', 'runs'), args.name))
@@ -35,13 +36,27 @@ class TrainLogger(object):
             if self.mode == 'offline':
                 print(f"W&B running offline; sync later with: wandb sync {common['dir']}/wandb/offline-run-*")
 
+    def _wandb_log(self, tag, value, step):
+        '''
+        W&B's built-in step must increase monotonically, so per-step 'train/*' logging followed by per-epoch
+        'val/*' logging under step= silently drops the epoch metrics. Instead each metric group gets its own
+        x-axis, declared once via define_metric: 'train/*' is plotted against global_step, everything else
+        against epoch, and the axis value travels inside the logged dict.
+        '''
+        group = tag.split('/', 1)[0]
+        axis = 'global_step' if group == 'train' else 'epoch'
+        if group not in self._defined:
+            self.wandb_run.define_metric(f'{group}/*' if '/' in tag else tag, step_metric=axis)
+            self._defined.add(group)
+        self.wandb_run.log({tag: value, axis: int(step)})
+
     def scalar(self, tag, value, step):
         if not self.enabled:
             return
         value = float(value)
         self.tb.add_scalar(tag, value, step)
         if self.wandb_run is not None:
-            self.wandb_run.log({tag: value}, step=step)
+            self._wandb_log(tag, value, step)
 
     def scalars(self, values, step, prefix=''):
         for k, v in values.items():
@@ -55,7 +70,7 @@ class TrainLogger(object):
         self.tb.add_histogram(tag, v, step)
         if self.wandb_run is not None:
             import wandb
-            self.wandb_run.log({tag: wandb.Histogram(v)}, step=step)
+            self._wandb_log(tag, wandb.Histogram(v), step)
 
     def image(self, tag, hwc_uint8, step):
         if not self.enabled:
@@ -64,12 +79,12 @@ class TrainLogger(object):
         self.tb.add_image(tag, img, step, dataformats='HWC')
         if self.wandb_run is not None:
             import wandb
-            self.wandb_run.log({tag: wandb.Image(img)}, step=step)
+            self._wandb_log(tag, wandb.Image(img), step)
 
     def table(self, tag, columns, rows, step):
         if self.enabled and self.wandb_run is not None:
             import wandb
-            self.wandb_run.log({tag: wandb.Table(columns=list(columns), data=[list(r) for r in rows])}, step=step)
+            self._wandb_log(tag, wandb.Table(columns=list(columns), data=[list(r) for r in rows]), step)
 
     def finish(self):
         if self.tb is not None:

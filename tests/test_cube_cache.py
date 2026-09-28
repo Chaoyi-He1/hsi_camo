@@ -48,6 +48,28 @@ def test_dataset_reads_from_cache_identically(synthetic_root):
     assert blk.shape == (133, 12, 16) and blk.dtype == np.float32
 
 
+def test_cache_float16_path_is_a_view_and_matches_h5(synthetic_root):
+    root, info, _ = synthetic_root
+    build_cube_cache(str(root), 'train', num_workers=0); build_cube_cache(str(root), 'test', num_workers=0)
+    cdir = default_cache_dir(str(root))
+    blk = make(root, cache_dir=cdir, out_dtype='float16').read_cube_block('3', h0=5, w0=7, ch=16, cw=12)
+    assert blk.shape == (133, 12, 16) and blk.dtype == np.float16
+    assert isinstance(blk, np.memmap) and blk.base is not None                 # zero-copy view of the cache file
+    np.testing.assert_allclose(blk.astype(np.float32), info[('train', '3')][0][:133, 7:19, 5:21], rtol=1e-3, atol=1e-6)
+    # __getitem__ in float16 must agree with the .mat path (one extra fp16 rounding of the p99 scale allowed)
+    for kw in (dict(split='test', use_filter=False, norm='p99'),
+               dict(split='test', use_filter=True, num_filters=8, norm='p99'),
+               dict(split='train', use_filter=False, crop_size=16, obj_crop_prob=1.0, seed=3, norm='p99')):
+        a, _, _ = make(root, out_dtype='float16', **kw)[0]
+        b, _, _ = make(root, cache_dir=cdir, out_dtype='float16', **kw)[0]
+        assert a.dtype == b.dtype == np.float16 and a.shape == b.shape and b.flags['C_CONTIGUOUS']
+        np.testing.assert_allclose(a.astype(np.float32), b.astype(np.float32), rtol=4e-3, atol=1e-3)
+    # full frame without filter: the returned image is produced without any float32 intermediate
+    ds = make(root, cache_dir=cdir, split='test', use_filter=False, norm='p99', out_dtype='float16')
+    img, _, _ = ds[0]
+    assert img.dtype == np.float16 and img.shape == (133, H, W) and img.flags['C_CONTIGUOUS']
+
+
 def test_dataset_cache_asserts_when_missing(synthetic_root, tmp_path):
     root, _, _ = synthetic_root
     with pytest.raises(AssertionError, match="cube_cache"):
