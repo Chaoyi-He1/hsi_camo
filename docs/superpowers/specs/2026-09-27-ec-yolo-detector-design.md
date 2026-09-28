@@ -195,7 +195,23 @@ Asserts with f-string messages (project style): cache file missing → message w
 
 Best single-epoch val values during A (all candidates): recall50 0.58 (ep 44), AP50 0.42 (ep 70), coverage_recall99_roi 0.74 (ep 30); at the operating point coverage_recall99_roi_op 0.45 (ep 75).
 
-**Session B (`det_B`, top-10 voltages, initialised from A `model_89`, W&B `sx6olkal`):** running; results and the ROI export (`results/det/rois_{train,test}.json`) are appended below when finished.
+**Session B (`det_B`, the 10 voltages above, no weight vector, initialised from A `model_89`, W&B `sx6olkal`).** Stopped by the user at epoch 91/100 (plateau since ≈ epoch 25). With only 10 channels the GPU footprint drops from 15.3 GB to 5.3 GB; the step time stays ≈ 1.6 s because the run is disk-bound. Warm start: val recall50 0.39 / AP50 0.21 after epoch 0, 0.55 / 0.26 after epoch 1. `model_best` under `select_keys` = **epoch 25**. Best single-epoch val values: AP50 0.50 (ep 36, 60), recall50 0.65 (ep 5, 36, 37, 82), matched IoU 0.79 (ep 48), tightness 0.78 (ep 36), coverage_recall99_roi_op 0.61 (ep 25).
+
+| Session B, `model_best` (epoch 25) | val (28 fr / 31 obj) | test (70 fr / 71 obj) |
+|---|---|---|
+| recall50 / AP50 | 0.613 / 0.423 | 0.521 / 0.356 |
+| matched IoU | 0.712 | 0.683 |
+| coverage_recall99_raw / _roi (all candidates) | 0.387 / 0.710 | 0.268 / 0.620 |
+| tightness / center_offset (all candidates) | 0.690 / 0.114 | 0.608 / 0.177 |
+| recall50_op / coverage_recall99_roi_op (conf ≥ 0.02, top 5) | 0.548 / 0.613 | 0.437 / 0.465 |
+| contain_rate_op / tightness_op / center_offset_op | 0.226 / 0.680 / 0.089 | 0.169 / 0.633 / 0.110 |
+| candidates per frame (conf ≥ 0.001 / operating point) | 9.9 / 1.79 | 8.2 / 1.70 |
+
+*A vs B.* On val the 10-channel model is ahead of the 344-channel one (AP50 0.42 vs 0.30, recall50 0.61 vs 0.45, ROI coverage at the operating point 0.61 vs 0.55); on test it is slightly behind (AP50 0.36 vs 0.44, recall50 0.52 vs 0.56, 0.47 vs 0.55) — within the noise of 31/71 objects, so the top-10 filter responses carry essentially the information the detector uses. Caveat: the 10 voltages form two clusters of near-identical spectral responses (1.26–1.41 V, −0.35 to −0.44 V), so this is closer to "two responses suffice" than to "these ten are optimal"; a control with 10 uniformly spaced or OSP-selected voltages would separate the two readings. Confidence calibration on B `model_best` (val) matches A's: `roi_conf` 0.25 → 36 % of objects inside an exported ROI (0.57 boxes/frame), 0.10 → 52 % (0.93), **0.02 → 61 % (1.79, kept)**, 0.001 (top-5 only) → 71 % (3.57).
+
+**ROI export** (`main_det_rois.py --session B --resume weights/det_B/model_best`, conf ≥ 0.02, top 5, margin 1.5×, min 256 px): `results/det/rois_test.json` — 70 frames, 71 objects, ROI coverage recall@0.99 **0.465**; `results/det/rois_train.json` — 279 frames (train + val), 289 objects, **0.696**. Stage 2 therefore starts with ≈ 1.7 ROIs per frame that fully contain about half of the unseen objects; lowering `roi_conf` to 0.001 raises val coverage to 0.71 at 3.6 ROIs per frame if Stage 2 prefers recall.
+
+**Control (`raw133_A`, `--raw-bands`: the 133 raw bands of 400–800 nm straight into YOLO26s, identity projection, no gate, W&B `ku0jkcha`):** running; its val/test numbers against session A are appended here when finished.
 
 ## 11. Out of scope
 
