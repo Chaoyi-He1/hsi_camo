@@ -1,0 +1,10 @@
+# EC-filter YOLO26 detector hyper-parameters (CLI flags override lr/epochs/batch; these are the loss/eval knobs)
+gate_entropy_weight: 0.05     # sparsity of the weight vector w = N*softmax(theta); 0 disables
+contain_weight: 1.0           # asymmetric containment hinge inside the box loss; 0 = plain YOLO26 loss
+max_norm: 10.0                # gradient clipping
+conf_thres: 0.001             # decoding threshold for metrics (low: recall/AP need all predictions)
+iou_thres: 0.6                # NMS IoU
+max_det: 300
+roi_margin: 1.5               # Stage-2 crop = box grown 1.5x about its centre ...
+roi_min: 256                  # ... and at least 256 px per side
+min_area: 100                 # GT mask components below this many pixels are JPEG specks, not objects (tests use 10)
