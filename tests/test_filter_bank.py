@@ -1,9 +1,16 @@
+import os
 import numpy as np
 import torch
 import pytest
 
 from models.filter_bank import FilterBank
 from data_loader.my_dataset import HyperCOD_data
+
+# GPU tests are opt-in: this box shares one GPU with the live detector runs, so a test that allocates on CUDA
+# OOMs against them and fails the suite. Set HSI_CAMO_GPU_TESTS=1 to run them on an idle GPU.
+GPU_TESTS = os.environ.get('HSI_CAMO_GPU_TESTS') == '1'
+requires_gpu = pytest.mark.skipif(not (GPU_TESTS and torch.cuda.is_available()),
+                                  reason="GPU test: set HSI_CAMO_GPU_TESTS=1 with a free CUDA device")
 
 
 def make(root, **kw):
@@ -40,11 +47,19 @@ def test_weight_vector_softmax_scaling_and_ranking():
     assert fb.theta.requires_grad and list(fb.parameters()) == [fb.theta]
 
 
+def _autocast_roundtrip(device, dtype):
+    '''FilterBank under autocast: low-precision in, the same low precision out, no inf/nan from the einsum.'''
+    fb = FilterBank(np.random.rand(133, 8).astype(np.float32) / 133, np.zeros(8, np.float32), np.ones(8, np.float32)).to(device)
+    x = torch.rand(1, 133, 64, 64, device=device, dtype=dtype)
+    with torch.autocast(device, dtype=dtype):
+        y = fb(x)                                                               # [1, 8, 64, 64]
+    assert y.dtype == dtype and torch.isfinite(y).all()
+
+
+def test_filter_bank_is_low_precision_safe_under_autocast_on_cpu():
+    _autocast_roundtrip('cpu', torch.bfloat16)
+
+
+@requires_gpu
 def test_filter_bank_is_fp16_safe_under_autocast():
-    if not torch.cuda.is_available():
-        pytest.skip("cuda")
-    fb = FilterBank(np.random.rand(133, 8).astype(np.float32) / 133, np.zeros(8, np.float32), np.ones(8, np.float32)).cuda()
-    x = torch.rand(1, 133, 64, 64, device='cuda', dtype=torch.float16)
-    with torch.autocast('cuda', dtype=torch.float16):
-        y = fb(x)
-    assert y.dtype == torch.float16 and torch.isfinite(y).all()
+    _autocast_roundtrip('cuda', torch.float16)
