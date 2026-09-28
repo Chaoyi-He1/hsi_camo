@@ -1,7 +1,8 @@
 # EC-filter YOLO26 detector hyper-parameters (CLI flags override lr/epochs/batch; these are the loss/eval knobs)
 gate_entropy_weight: 0.05     # sparsity of the weight vector w = N*softmax(theta); 0 disables
-gate_lr: 0.01                 # lr of the gate logits theta (own AdamW group, no decay); at the model lr (1e-4) the
-                              # 344-way softmax never leaves uniform (entropy 1.0000 after 12 epochs)
+gate_lr: 0.02                 # lr of the gate logits theta (own AdamW group, no decay); at the model lr (1e-4) the
+                              # 344-way softmax never leaves uniform (entropy 1.0000 after 12 epochs); 1e-2 moved the
+                              # weights only to 0.86-1.20 in 120 steps (gradient mostly noise until the gate commits)
 contain_weight: 1.0           # asymmetric containment hinge inside the box loss; 0 = plain YOLO26 loss
 max_norm: 10.0                # gradient clipping
 conf_thres: 0.001             # decoding threshold for metrics (low: recall/AP need all predictions)
