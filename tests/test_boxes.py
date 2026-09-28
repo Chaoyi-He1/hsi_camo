@@ -10,11 +10,12 @@ from tests.conftest import H, W, OBJ_SLICE
 
 
 def test_boxes_from_mask_single_and_specks():
-    m = np.zeros((H, W), bool); m[OBJ_SLICE] = True; m[40, 5] = True      # 6x6 object + 1-px speck
-    b = boxes_from_mask(m)
+    m = np.zeros((H, W), bool); m[OBJ_SLICE] = True; m[40, 5] = True      # 6x6 object (36 px) + 1-px speck
+    b = boxes_from_mask(m, min_area=10)                                      # the fixture object is smaller than the real-data default of 100 px
     np.testing.assert_array_equal(b, [[20, 10, 26, 16]]); assert b.dtype == np.float32
-    b2, labels, ids = boxes_from_mask(m, return_labels=True)
+    b2, labels, ids = boxes_from_mask(m, min_area=10, return_labels=True)
     assert labels.shape == (H, W) and ids == [1] and (labels == 1).sum() == 36
+    assert boxes_from_mask(m).shape == (0, 4)                                # default min_area=100 drops the 36-px fixture object
     assert boxes_from_mask(np.zeros((H, W), bool)).shape == (0, 4)
 
 
@@ -45,7 +46,7 @@ def test_expand_box_margin_min_size_and_clipping():
 def test_det_collate_fn_builds_yolo_batch(synthetic_root):
     root, _, _ = synthetic_root
     ds = HyperCOD_data(str(root), split='train', use_filter=False, norm='p99', crop_size=0, out_dtype='float16', filter_norm='none')
-    batch = det_collate_fn([ds[0], ds[1]])
+    batch = det_collate_fn([ds[0], ds[1]], min_area=10)                       # fixture objects are 36 px
     assert batch['img'].shape == (2, 133, H, W) and batch['img'].dtype == torch.float16
     assert batch['batch_idx'].tolist() == [0.0, 1.0] and batch['cls'].shape == (2, 1) and batch['bboxes'].shape == (2, 4)
     np.testing.assert_allclose(batch['bboxes'][0].numpy(), [23 / W, 13 / H, 6 / W, 6 / H], rtol=1e-6)

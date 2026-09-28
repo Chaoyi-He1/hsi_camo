@@ -3,9 +3,9 @@ import torch
 from scipy import ndimage
 
 
-def boxes_from_mask(mask, min_area=10, return_labels=False):
+def boxes_from_mask(mask, min_area=100, return_labels=False):
     '''
-    One box per connected foreground component with area >= min_area (JPEG ringing specks are smaller).
+    One box per connected foreground component with area >= min_area (JPEG ringing specks are smaller than 100 px).
     Returns float32 [K, 4] xyxy with x2/y2 exclusive, ordered by component label (row-major first pixel);
     with return_labels also the label map [H, W] int32 and the kept label ids.
     '''
@@ -54,10 +54,11 @@ def expand_box(box, margin, min_size, H, W):
     return np.array([max(0.0, cx - w / 2), max(0.0, cy - h / 2), min(float(W), cx + w / 2), min(float(H), cy + h / 2)], dtype=np.float32)
 
 
-def det_collate_fn(batch):
+def det_collate_fn(batch, min_area=100):
     '''
     HyperCOD_data (img [C, H, W], gt [1, H, W], name) tuples -> the batch dict ultralytics' model.loss reads
     (img, batch_idx, cls, bboxes normalised cx,cy,w,h) plus the masks and pixel boxes for the metrics.
+    Use functools.partial(det_collate_fn, min_area=...) as the DataLoader collate_fn to change the box floor.
     '''
     imgs, gts, names = list(zip(*batch))
     img = torch.from_numpy(np.stack(imgs, axis=0))                        # [B, C, H, W], dataset dtype
@@ -65,7 +66,7 @@ def det_collate_fn(batch):
     masks, boxes_xyxy, batch_idx, bboxes = [], [], [], []
     for i, gt in enumerate(gts):
         m = gt[0] > 0.5                                                   # [H, W] bool
-        b = boxes_from_mask(m)                                            # [K, 4]
+        b = boxes_from_mask(m, min_area=min_area)                         # [K, 4]
         masks.append(m); boxes_xyxy.append(b)
         batch_idx.append(np.full(len(b), i, dtype=np.float32)); bboxes.append(boxes_to_yolo(b, H, W))
     batch_idx = torch.from_numpy(np.concatenate(batch_idx)) if batch_idx else torch.zeros(0)
