@@ -1,5 +1,6 @@
 import json
 import os
+import types
 import torch
 
 import main_det
@@ -77,3 +78,22 @@ def test_same_session_resume_keeps_best_and_loss_schedule(synthetic_root, tmp_pa
     assert rec['epoch'] == 1 and rec['best'] == [1.0, 1.0]             # carried over, not re-initialised to (-1, -1)
     assert (out / 'model_best').read_bytes() == best_bytes             # the pre-resume best was not clobbered
     assert len(calls) == 2                                             # 1 replayed epoch + 1 trained epoch
+
+
+def test_build_optimizer_gives_the_gate_its_own_lr():
+    class Fake(torch.nn.Module):
+        def __init__(self, gate):
+            super().__init__()
+            self.filter_bank = torch.nn.Module()
+            if gate:
+                self.filter_bank.theta = torch.nn.Parameter(torch.zeros(6))
+            self.yolo = torch.nn.Module(); self.yolo.model = torch.nn.ModuleList([torch.nn.Conv2d(6, 4, 3)])
+            self.head = torch.nn.Linear(4, 2)
+    args = types.SimpleNamespace(lr=1e-4, gate_lr=1e-2, weight_decay=5e-4)
+    opt = main_det.build_optimizer(Fake(gate=True), args)
+    assert len(opt.param_groups) == 3
+    assert opt.param_groups[0]['weight_decay'] == 5e-4 and opt.param_groups[1]['weight_decay'] == 0.0
+    g = opt.param_groups[2]
+    assert g['lr'] == 1e-2 and g['weight_decay'] == 0.0 and len(g['params']) == 1 and tuple(g['params'][0].shape) == (6,)
+    assert sum(len(g['params']) for g in opt.param_groups) == 5          # theta, conv w/b, linear w/b: each exactly once
+    assert len(main_det.build_optimizer(Fake(gate=False), args).param_groups) == 2   # session B: no gate group

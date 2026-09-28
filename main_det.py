@@ -60,6 +60,7 @@ def get_args_parser():
     parser.add_argument('--yolo-variant', default='yolo26s')
     parser.add_argument('--pretrained', default='auto', help="'auto' downloads <variant>.pt, a path, or 'none'")
     parser.add_argument('--gate-entropy-weight', type=float, default=None, help='overrides cfg')
+    parser.add_argument('--gate-lr', type=float, default=None, help='lr of the gate logits theta (session A); overrides cfg gate_lr')
     parser.add_argument('--contain-weight', type=float, default=None, help='overrides cfg')
     # data
     parser.add_argument('--data-path', default='/data2/chaoyi/HyperCOD/Raw data')
@@ -100,10 +101,28 @@ def get_args_parser():
     return parser
 
 
+def build_optimizer(model_without_ddp, args):
+    '''
+    AdamW in three groups: weights (decayed), biases / norms / the rebuilt first conv (no decay), and the gate logits
+    filter_bank.theta with their own lr (session A only). The gate needs it: AdamW moves a logit by about lr per
+    step, so at the model's 1e-4 the 344-way softmax stays uniform for a whole run (det_A: normalised entropy
+    1.0000 after 12 epochs) and the top-k ranking would be noise. cfg gate_lr / --gate-lr set it.
+    '''
+    named = [(n, p) for n, p in model_without_ddp.named_parameters() if p.requires_grad]
+    gate = [p for n, p in named if n == 'filter_bank.theta']
+    no_decay = [p for n, p in named if n != 'filter_bank.theta' and (n.endswith('.bias') or n == 'yolo.model.0.conv.weight' or p.ndim == 1)]
+    skip = {id(p) for p in no_decay} | {id(p) for p in gate}
+    decay = [p for n, p in named if id(p) not in skip]
+    groups = [{'params': decay, 'weight_decay': args.weight_decay}, {'params': no_decay, 'weight_decay': 0.0}]
+    if gate:
+        groups.append({'params': gate, 'weight_decay': 0.0, 'lr': args.gate_lr})
+    return torch.optim.AdamW(groups, lr=args.lr)
+
+
 def load_cfg(args):
     with open(args.hpy) as f:
         cfg = yaml.safe_load(f)
-    for k in ['gate_entropy_weight', 'contain_weight', 'conf_thres', 'iou_thres', 'roi_margin', 'roi_min',
+    for k in ['gate_entropy_weight', 'gate_lr', 'contain_weight', 'conf_thres', 'iou_thres', 'roi_margin', 'roi_min',
               'roi_conf', 'roi_topk', 'min_area']:
         if getattr(args, k) is None:
             setattr(args, k, cfg[k])
@@ -218,9 +237,7 @@ def main(args):
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu]); model_without_ddp = model.module
 
-    no_decay = [p for n, p in model_without_ddp.named_parameters() if p.requires_grad and (n.endswith('.bias') or n == 'filter_bank.theta' or n == 'yolo.model.0.conv.weight' or p.ndim == 1)]
-    decay = [p for n, p in model_without_ddp.named_parameters() if p.requires_grad and all(p is not q for q in no_decay)]
-    optimizer = torch.optim.AdamW([{'params': decay, 'weight_decay': args.weight_decay}, {'params': no_decay, 'weight_decay': 0.0}], lr=args.lr)
+    optimizer = build_optimizer(model_without_ddp, args)
     lf = lambda x: ((1 + math.cos(x * math.pi / args.epochs)) / 2) * (1 - args.lrf) + args.lrf
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
     # AMP must always be on when running on CUDA: the 344-channel response tensor has to stay fp16 at full
