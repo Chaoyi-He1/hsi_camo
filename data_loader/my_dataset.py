@@ -19,7 +19,8 @@ HYPERCUBE_KEY = 'hypercube'   # variable name inside the MATLAB v7.3 (HDF5) .mat
 class HyperCOD_data(Dataset.Dataset):
     def __init__(self, data_path, split='train', use_filter=True, filter_path=None, num_filters=30,
                  filter_select='uniform', filter_voltages=None, crop_size=512, obj_crop_prob=0.5,
-                 norm='p99z', band_range=(400.0, 800.0), filter_norm='l1', stats_path=None, seed=None):
+                 norm='p99z', band_range=(400.0, 800.0), filter_norm='l1', stats_path=None, seed=None,
+                 cache_dir=None, ids=None, out_dtype='float32'):
         super(HyperCOD_data, self).__init__()
         self.data_path = data_path
         self.split = split  # 'train' or 'test'
@@ -43,6 +44,12 @@ class HyperCOD_data(Dataset.Dataset):
         self.n_bands = len(self.band_idx)
         self.stats_path = stats_path if stats_path is not None else default_stats_path(data_path, self.band_range)
         self.seed = seed
+        # directory of precomputed fp16 full-frame cubes (data_loader.cube_cache.build_cube_cache); None reads
+        # the .mat file directly in read_cube_block (see there for the disk layout of each path)
+        self.cache_dir = cache_dir
+        # dtype of the array __getitem__ returns (and, via cube_cache, the array written to the on-disk cache);
+        # float16 halves host memory and PCIe transfer, float32 (default) keeps today's precision
+        self.out_dtype = np.dtype(out_dtype)
         # never keep the random module itself on the instance: a module is not picklable, which breaks
         # DataLoader workers with the spawn/forkserver start methods; see the rng property
         self._rng = random.Random(seed) if seed is not None else None
@@ -51,6 +58,7 @@ class HyperCOD_data(Dataset.Dataset):
         assert self.split in ['train', 'test'], "split must be 'train' or 'test'"
         assert self.norm in ['none', 'p99', 'p99z'], "norm must be 'none', 'p99' or 'p99z'"
         assert self.filter_norm in ['none', 'l1'], "filter_norm must be 'none' or 'l1'"
+        assert self.out_dtype in (np.float16, np.float32), f"out_dtype must be 'float16' or 'float32', got {out_dtype!r}"
         assert os.path.exists(self.data_path), f"Data path {self.data_path} does not exist"
         assert os.path.exists(self.filter_path), f"Filter file {self.filter_path} does not exist"
 
@@ -65,6 +73,11 @@ class HyperCOD_data(Dataset.Dataset):
         assert all(n.isdigit() for n in names), \
             f"non-numeric .mat names in {self.hsi_path}: {[n for n in names if not n.isdigit()]}"
         self.img_name = sorted(names, key=int)
+        if ids is not None:
+            ids = [str(i) for i in ids]
+            missing = [i for i in ids if i not in self.img_name]
+            assert not missing, f"ids not found in {self.hsi_path}: {missing}"
+            self.img_name = sorted(ids, key=int)
         assert len(self.img_name) > 0, f"no .mat files found in {self.hsi_path}"
         for name in self.img_name:
             assert os.path.exists(os.path.join(self.gt_path, f'{name}.png')), f"GT for sample {name} not found in {self.gt_path}"
@@ -158,6 +171,19 @@ class HyperCOD_data(Dataset.Dataset):
             assert scale[name] > 0, f"non-positive intensity p99 for sample {name}"
         return scale
 
+    def _band_stats(self):
+        '''
+        (mu [n_bands], cov [n_bands, n_bands]) as float64 from self.stats_path, of the p99-normalised bands
+        inside band_range; built from the train split on first use (band_stats.compute_band_stats) and just
+        loaded afterwards. Shared by load_channel_stats and filter_bank_tensors so both read the same file.
+        '''
+        if not os.path.exists(self.stats_path):
+            crop_size = STATS_CROP_SIZE if min(self.H, self.W) >= STATS_CROP_SIZE else 0  # tiny cubes: full frames
+            num_workers = 0 if len(self) < 8 else min(8, os.cpu_count() or 1)
+            compute_band_stats(self.data_path, self.stats_path, crop_size=crop_size, num_workers=num_workers,
+                               filter_path=self.filter_path, band_range=self.band_range)
+        return load_band_stats(self.stats_path, band_range=self.band_range)  # [n_bands], [n_bands, n_bands]
+
     def load_channel_stats(self):
         '''
         Per-channel mean/std for norm='p99z' from the training band statistics (mean [n_bands], cov
@@ -168,12 +194,7 @@ class HyperCOD_data(Dataset.Dataset):
         the band statistics by linearity: mean_y = R^T mu, var_y = diag(R^T Sigma R).
         Returns (channel_mean [C], channel_std [C]) as float32, C = N filter channels or n_bands raw bands.
         '''
-        if not os.path.exists(self.stats_path):
-            crop_size = STATS_CROP_SIZE if min(self.H, self.W) >= STATS_CROP_SIZE else 0  # tiny cubes: full frames
-            num_workers = 0 if len(self) < 8 else min(8, os.cpu_count() or 1)
-            compute_band_stats(self.data_path, self.stats_path, crop_size=crop_size, num_workers=num_workers,
-                               filter_path=self.filter_path, band_range=self.band_range)
-        mu, cov = load_band_stats(self.stats_path, band_range=self.band_range)  # [n_bands], [n_bands, n_bands]
+        mu, cov = self._band_stats()  # [n_bands], [n_bands, n_bands]
         if self.use_filter:
             R = self.sensor_R_matrix.astype(np.float64)  # [n_bands, N]
             mean = R.T @ mu  # [N]
@@ -183,6 +204,20 @@ class HyperCOD_data(Dataset.Dataset):
         std = np.sqrt(np.maximum(var, 0.0))
         assert (std > 0).all(), f"zero-variance channels in {self.stats_path}: {np.where(std == 0)[0].tolist()}"
         return mean.astype(np.float32), std.astype(np.float32)
+
+    def filter_bank_tensors(self):
+        '''
+        (R [n_bands, N] float32, channel_mean [N] float32, channel_std [N] float32, selected_voltages [N]) for
+        the GPU FilterBank, independent of use_filter/norm: always the full sensor_R_matrix projected onto the
+        training band statistics, so e.g. a raw-band/norm='p99' instance (cheap to build for caching or CLI
+        smoke tests) can still hand a model the same filter bank and per-channel stats a use_filter=True,
+        norm='p99z' instance would use.
+        '''
+        mu, cov = self._band_stats()  # [n_bands], [n_bands, n_bands]
+        R = self.sensor_R_matrix.astype(np.float64)  # [n_bands, N]
+        mean = R.T @ mu  # [N]
+        std = np.sqrt(np.maximum(np.einsum('bn,bc,cn->n', R, cov, R), 0.0))  # [N]
+        return self.sensor_R_matrix.astype(np.float32), mean.astype(np.float32), std.astype(np.float32), self.selected_voltages.copy()
 
     def load_gt(self, name):
         '''GT pngs are JPEG-compressed with 3 identical channels; foreground = channel 0 > 127. Returns bool [H, W].'''
@@ -201,11 +236,24 @@ class HyperCOD_data(Dataset.Dataset):
 
     def read_cube_block(self, name, h0, w0, ch, cw):
         '''
-        Read a spatial window of the cube directly from the .mat (HDF5) file, restricted to the bands inside
-        band_range (self.band_idx is contiguous, so this is a single hyperslab on the band axis).
-        h5py layout is [B, W, H], so W is indexed with w0:w0+cw and H with h0:h0+ch.
-        Returns float32 [n_bands, cw, ch]. The file is opened per call so DataLoader workers stay independent.
+        Read a spatial window of the cube, restricted to the bands inside band_range (self.band_idx is
+        contiguous, so this is a single hyperslab on the band axis).
+        cache_dir set: sliced out of the precomputed fp16 full-frame cube (data_loader.cube_cache), stored on
+        disk as [n_bands, H, W]. cache_dir None: read directly from the .mat (HDF5) file, opened per call so
+        DataLoader workers stay independent; h5py layout is [B, W, H], so W is indexed with w0:w0+cw and H
+        with h0:h0+ch.
+        Returns float32 [n_bands, cw, ch] either way.
         '''
+        if self.cache_dir is not None:
+            from data_loader.cube_cache import cache_path
+            p = cache_path(self.cache_dir, self.split, name)
+            assert os.path.exists(p), f"cache file {p} missing; build it with: python -m data_loader.cube_cache --data_path '{self.data_path}' --split {self.split}"
+            arr = np.load(p, mmap_mode='r')                               # [n_bands, H, W] fp16
+            assert arr.shape == (self.n_bands, self.H, self.W) and arr.dtype == np.float16, \
+                f"cache {p} has {arr.shape} {arr.dtype}, expected ({self.n_bands}, {self.H}, {self.W}) float16"
+            blk = np.ascontiguousarray(arr[:, h0:h0 + ch, w0:w0 + cw], dtype=np.float32)   # [n_bands, ch, cw]
+            return np.ascontiguousarray(blk.transpose(0, 2, 1))                            # -> [n_bands, cw, ch] like the h5 path
+
         b0, b1 = int(self.band_idx[0]), int(self.band_idx[-1]) + 1
         with h5py.File(os.path.join(self.hsi_path, f'{name}.mat'), 'r') as f:
             blk = f[HYPERCUBE_KEY][b0:b1, w0:w0 + cw, h0:h0 + ch]
@@ -255,10 +303,12 @@ class HyperCOD_data(Dataset.Dataset):
             img = blk  # raw bands [B, cw, ch]
 
         # only the last two axes are swapped: [C, cw, ch] -> [C, ch, cw]; never build [H, W, B] (6 s per crop)
-        img = np.ascontiguousarray(img.transpose(0, 2, 1), dtype=np.float32)  # [C, ch, cw]
+        img = np.ascontiguousarray(img.transpose(0, 2, 1), dtype=self.out_dtype)  # [C, ch, cw]
         if self.norm == 'p99z':
-            # per-channel standardisation after the (simulated) readout
-            img = (img - self.channel_mean[:, None, None]) / self.channel_std[:, None, None]  # [C, ch, cw]
+            # per-channel standardisation after the (simulated) readout, always done in float32 regardless of
+            # out_dtype and cast back down at the end (out_dtype=float16 would otherwise round twice)
+            img = ((img.astype(np.float32) - self.channel_mean[:, None, None])
+                   / self.channel_std[:, None, None]).astype(self.out_dtype)  # [C, ch, cw]
         gt = gt[h0:h0 + ch, w0:w0 + cw].astype(np.float32)[None]  # [1, ch, cw]
         return img, gt, name
 
@@ -327,6 +377,11 @@ def add_dataset_args(parser):
                              'none: keep the peak-normalised columns (channels ~20-65x larger, see HyperCOD_data.filter_gain)')
     parser.add_argument('--stats_path', type=str, default=None,
                         help='training band statistics .npz for norm p99z, default <data_path>/band_stats_train.npz')
+    parser.add_argument('--cache_dir', type=str, default=None,
+                        help='precomputed fp16 full-frame cube cache to read instead of the raw .mat files, '
+                             'default None (read .mat directly); build one with python -m data_loader.cube_cache')
+    parser.add_argument('--out_dtype', type=str, default='float32', choices=['float32', 'float16'],
+                        help='dtype of the tensor returned by __getitem__; float16 halves host memory and PCIe transfer')
     return parser
 
 
@@ -336,7 +391,7 @@ def build_dataset(args, split):
                          filter_select=args.filter_select, filter_voltages=args.filter_voltages,
                          crop_size=args.crop_size, obj_crop_prob=args.obj_crop_prob, norm=args.norm,
                          band_range=tuple(args.band_range), filter_norm=args.filter_norm,
-                         stats_path=args.stats_path)
+                         stats_path=args.stats_path, cache_dir=args.cache_dir, out_dtype=args.out_dtype)
 
 
 if __name__ == '__main__':
