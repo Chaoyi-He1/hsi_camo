@@ -74,8 +74,9 @@ def draw_boxes(img_uint8, boxes, color, width=3, dashed=False):
     im = Image.fromarray(np.ascontiguousarray(img_uint8)); d = ImageDraw.Draw(im)
     for b in np.asarray(boxes).reshape(-1, 4):
         x1, y1, x2, y2 = [float(v) for v in b]
+        x1, x2 = sorted((x1, x2)); y1, y2 = sorted((y1, y2))       # a degenerate/inverted box (early epochs) must not crash the eval
         if not dashed:
-            d.rectangle([x1, y1, x2 - 1, y2 - 1], outline=color, width=width)
+            d.rectangle([x1, y1, max(x2 - 1, x1), max(y2 - 1, y1)], outline=color, width=width)
         else:
             pts = [(x1, y1), (x2, y1), (x2, y2), (x1, y2), (x1, y1)]
             for (ax, ay), (bx, by) in zip(pts[:-1], pts[1:]):
