@@ -2172,7 +2172,7 @@ Record in the spec §10: top-10 voltages, val/test `coverage_recall99_raw`, `cov
 
 ## Results
 
-See the spec's §12 for the full tables. Summary (2026-09-29): session A trained 100 epochs (7 h 50 min, ≈ 2 s/step disk-bound after the O_DIRECT loader fix); converged top-10 voltages `1.32, 1.29, 1.35, -0.41, -0.38, 1.38, -0.44, 1.41, 1.26, -0.35 V`; the spec's checkpoint-selection rule picked epoch 0, so `cfg select_keys` now uses the ROI operating-point pair and `roi_conf` was calibrated to 0.02; session B was launched from A's `model_89` with `gate_ranking_ep89.csv`. Task 11 Steps 4–6 were run with `python -u`, 6 DataLoader workers and the launch scripts in the session's tmp dir; Step 5 uses `--resume weights/det_A/model_89 --ranking weights/det_A/gate_ranking_ep89.csv` instead of `model_best`/`gate_ranking.csv` for the reason above.
+See the spec's §12 for the full tables. Summary (2026-09-29): session A trained 100 epochs (7 h 50 min, ≈ 2 s/step disk-bound after the O_DIRECT loader fix); converged top-10 voltages `1.32, 1.29, 1.35, -0.41, -0.38, 1.38, -0.44, 1.41, 1.26, -0.35 V`; the spec's checkpoint-selection rule picked epoch 0, so `cfg select_keys` now uses the ROI operating-point pair and `roi_conf` was calibrated to 0.02; session B was launched from A's `model_89` with `gate_ranking_ep89.csv`. Task 11 Steps 4–6 were run with `python -u`, 6 DataLoader workers and the launch scripts in `bash_files/`; Step 5 uses `--resume weights/det_A/model_89 --ranking weights/det_A/gate_ranking_ep89.csv` instead of `model_best`/`gate_ranking.csv` for the reason above.
 
 ---
 
