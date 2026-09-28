@@ -18,15 +18,15 @@ import main_det
 from data_loader.boxes import det_collate_fn, expand_box, boxes_from_mask
 from data_loader.my_dataset import HyperCOD_data
 from models.ec_yolo import decode_predictions
-from train_eval.box_metrics import mask_coverage
+from train_eval.box_metrics import mask_coverage, filter_to_operating_point
 
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Export detector ROIs', parents=[main_det.get_args_parser()], add_help=False)
     parser.add_argument('--split', default='test', choices=['train', 'test'])
     parser.add_argument('--out-dir', default='results/det')
-    parser.add_argument('--max-rois', type=int, default=5, help='detections kept per frame (by confidence)')
-    parser.set_defaults(conf_thres=0.25, wandb=False)
+    parser.add_argument('--max-rois', type=int, default=None, help='detections kept per frame; overrides cfg roi_topk')
+    parser.set_defaults(wandb=False)
     return parser
 
 
@@ -35,6 +35,10 @@ def main(args):
     utils.init_distributed_mode(args)
     main_det.load_cfg(args)
     assert args.resume, "--resume <detector checkpoint> is required, e.g. --resume weights/det_B/model_best"
+    if args.max_rois is not None:
+        args.roi_topk = args.max_rois
+    # the export operating point is cfg roi_conf/roi_topk, the same one evaluate() reports its *_op metrics at
+    print(f"ROI operating point: conf >= {args.roi_conf}, top {args.roi_topk} per frame")
     device = torch.device(args.device if args.device == 'cpu' or torch.cuda.is_available() else 'cpu')
     # One dataset only, built exactly like the training ones (same cache, same numeric path). It also hands
     # build_model the filter matrices: filter_bank_tensors() is split-independent (the band statistics always
@@ -50,7 +54,7 @@ def main(args):
         with torch.autocast(device.type, enabled=device.type == 'cuda' and args.amp):
             dets = decode_predictions(model(img), conf_thres=args.conf_thres, iou_thres=args.iou_thres, max_det=args.max_det)[0]
         H, W = img.shape[-2:]
-        dets = dets[np.argsort(-dets[:, 4])][:args.max_rois]
+        dets = filter_to_operating_point(dets, args.roi_conf, args.roi_topk)         # shared with BoxMetrics' *_op keys
         dets[:, [0, 2]] = dets[:, [0, 2]].clip(0, W); dets[:, [1, 3]] = dets[:, [1, 3]].clip(0, H)
         rois = [[*expand_box(d[:4], args.roi_margin, args.roi_min, H, W).tolist(), float(d[4])] for d in dets]
         gt_boxes, labels, ids = boxes_from_mask(batch['masks'][0], min_area=args.min_area, return_labels=True)

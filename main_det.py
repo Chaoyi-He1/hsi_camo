@@ -85,6 +85,8 @@ def get_args_parser():
     # eval overrides
     parser.add_argument('--conf-thres', type=float, default=None); parser.add_argument('--iou-thres', type=float, default=None)
     parser.add_argument('--roi-margin', type=float, default=None); parser.add_argument('--roi-min', type=float, default=None)
+    parser.add_argument('--roi-conf', type=float, default=None, help='ROI operating point: confidence floor (cfg: 0.25)')
+    parser.add_argument('--roi-topk', type=int, default=None, help='ROI operating point: detections kept per frame (cfg: 5)')
     parser.add_argument('--min-area', type=int, default=None, help='GT component floor in px (cfg: 100; fixture tests use 10)')
     # logging
     parser.add_argument('--output-dir', default='weights/det_A')
@@ -100,7 +102,8 @@ def get_args_parser():
 def load_cfg(args):
     with open(args.hpy) as f:
         cfg = yaml.safe_load(f)
-    for k in ['gate_entropy_weight', 'contain_weight', 'conf_thres', 'iou_thres', 'roi_margin', 'roi_min', 'min_area']:
+    for k in ['gate_entropy_weight', 'contain_weight', 'conf_thres', 'iou_thres', 'roi_margin', 'roi_min',
+              'roi_conf', 'roi_topk', 'min_area']:
         if getattr(args, k) is None:
             setattr(args, k, cfg[k])
     args.max_norm = cfg.get('max_norm', 10.0); args.max_det = cfg.get('max_det', 300)
@@ -242,7 +245,7 @@ def main(args):
             model_without_ddp.end_epoch()
 
     eval_kw = dict(conf_thres=args.conf_thres, iou_thres=args.iou_thres, max_det=args.max_det, roi_margin=args.roi_margin, roi_min=args.roi_min,
-                   min_area=args.min_area, amp=scaler is not None)
+                   min_area=args.min_area, roi_conf=args.roi_conf, roi_topk=args.roi_topk, amp=scaler is not None)
     results_path = os.path.join(args.output_dir, f'results_{args.name}.txt')
     if args.eval:
         val = evaluate(model_without_ddp, loader_val, device, logger=logger, epoch=args.start_epoch, tag='val', **eval_kw)

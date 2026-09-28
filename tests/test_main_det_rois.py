@@ -1,6 +1,6 @@
 import json
 import pytest
-import torch
+import yaml
 import main_det, main_det_rois
 from tests.test_main_det import _args
 from data_loader.cube_cache import build_cube_cache, default_cache_dir
@@ -10,10 +10,20 @@ def _roi_args(root, tmp_path, resume, **extra):
     argv = ['--data-path', str(root), '--split-file', str(tmp_path / 'val.json'), '--yolo-variant', 'yolo26n',
             '--pretrained', 'none', '--filter-select', 'uniform', '--num-filters', '6', '--device', 'cpu', '--amp',
             '--no-wandb', '--session', 'A', '--resume', str(resume), '--split', 'test', '--out-dir', str(tmp_path / 'rois'),
-            '--max-rois', '2', '--roi-min', '0', '--min-area', '10', '--num_workers', '0']
+            '--roi-min', '0', '--min-area', '10', '--num_workers', '0']
     for k, v in extra.items():
         argv += [k] + ([] if v is None else [str(v)])
     return main_det_rois.get_args_parser().parse_args(argv)
+
+
+def test_export_operating_point_comes_from_cfg(synthetic_root, tmp_path):
+    root, _, _ = synthetic_root
+    args = _roi_args(root, tmp_path, resume='x')
+    main_det.load_cfg(args)
+    with open(args.hpy) as f:
+        cfg = yaml.safe_load(f)
+    assert args.max_rois is None and (args.roi_conf, args.roi_topk) == (cfg['roi_conf'], cfg['roi_topk'])
+    assert (args.roi_conf, args.roi_topk) == (0.25, 5)      # the operating point evaluate()'s *_op keys use
 
 
 def test_dataset_kwargs_defaults_to_the_training_cache(synthetic_root, tmp_path):
@@ -44,8 +54,10 @@ def test_export_rois_json(synthetic_root, tmp_path, monkeypatch):
     def _no_build(*a, **k):
         raise AssertionError("the ROI export must not build the train/val/test datasets")
     monkeypatch.setattr(main_det, 'build_datasets', _no_build)
-    args = _roi_args(root, tmp_path, resume=out_a / 'model_best', **{'--conf-thres': '0.0'})   # no --cache-dir
+    # no --cache-dir: it must still come out as the training cache. --max-rois overrides cfg roi_topk.
+    args = _roi_args(root, tmp_path, resume=out_a / 'model_best', **{'--roi-conf': '0.0', '--max-rois': '2'})
     path = main_det_rois.main(args)
+    assert args.roi_topk == 2
     assert len(seen) == 1 and seen[0]['cache_dir'] == default_cache_dir(str(root)) and seen[0]['split'] == 'test'
 
     with open(path) as f:

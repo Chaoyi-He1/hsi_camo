@@ -65,19 +65,32 @@ def average_precision(confs, tp, n_gt):
     return float(np.sum((mrec[changes + 1] - mrec[changes]) * mpre[changes + 1]))
 
 
+def filter_to_operating_point(dets, conf, topk):
+    '''The ROI export operating point: detections with confidence >= conf, then the top-k by confidence.'''
+    dets = np.asarray(dets, np.float32).reshape(-1, 6)
+    dets = dets[dets[:, 4] >= conf]
+    return dets[np.argsort(-dets[:, 4])][:topk]                              # [<=topk, 6]
+
+
 class BoxMetrics(object):
-    '''Accumulates per-object records over a split; every metric is defined against the GT mask component.'''
+    '''
+    Accumulates per-object records over a split; every metric is defined against the GT mask component.
+    Every per-object metric is accumulated twice: over all decoded detections, and, under the same key with an
+    `_op` suffix, over the detections at the ROI export operating point (conf >= roi_conf, top roi_topk by
+    confidence) - the boxes main_det_rois.py actually hands Stage 2. The plain keys and select_score are
+    unchanged; the `_op` ones are diagnostics alongside them.
+    '''
 
-    def __init__(self, roi_margin=1.5, roi_min=256, min_area=100):
+    def __init__(self, roi_margin=1.5, roi_min=256, min_area=100, roi_conf=0.25, roi_topk=5):
         self.roi_margin, self.roi_min, self.min_area = roi_margin, roi_min, min_area
+        self.roi_conf, self.roi_topk = float(roi_conf), int(roi_topk)
         self.records, self.pred_conf, self.pred_tp, self.n_images, self.n_dets = [], [], [], 0, 0
+        self.records_op, self.n_dets_op = [], 0
 
-    def update(self, mask, dets):
-        H, W = mask.shape
-        gt_boxes, labels, ids = boxes_from_mask(mask, self.min_area, return_labels=True)
-        dets = np.asarray(dets, np.float32).reshape(-1, 6)
-        self.n_images += 1; self.n_dets += len(dets)
+    def _per_object(self, gt_boxes, labels, ids, dets, H, W):
+        '''One record per GT object from a greedy one-to-one match against `dets`.'''
         idx, best = match_greedy(gt_boxes, dets)
+        out = []
         for k, (gt, cid) in enumerate(zip(gt_boxes, ids)):
             comp = labels == cid
             rec = {'iou': float(best[k]), 'tp50': bool(best[k] >= 0.5), 'coverage_raw': 0.0, 'coverage_roi': 0.0,
@@ -89,8 +102,19 @@ class BoxMetrics(object):
                 rec['contains'] = contains(p, gt)
                 rec['tightness'] = tightness(gt, p) if rec['contains'] else float('nan')
                 rec['offset'] = center_offset(gt, p)
-            self.records.append(rec)
-        # AP bookkeeping: confidence-ordered greedy TP flags at IoU >= 0.5
+            out.append(rec)
+        return out
+
+    def update(self, mask, dets):
+        H, W = mask.shape
+        gt_boxes, labels, ids = boxes_from_mask(mask, self.min_area, return_labels=True)
+        dets = np.asarray(dets, np.float32).reshape(-1, 6)
+        self.n_images += 1; self.n_dets += len(dets)
+        self.records += self._per_object(gt_boxes, labels, ids, dets, H, W)
+        op = filter_to_operating_point(dets, self.roi_conf, self.roi_topk)
+        self.n_dets_op += len(op)
+        self.records_op += self._per_object(gt_boxes, labels, ids, op, H, W)
+        # AP bookkeeping (all detections): confidence-ordered greedy TP flags at IoU >= 0.5
         matched = set()
         for m in np.argsort(-dets[:, 4]) if len(dets) else []:
             iou = box_iou_matrix(gt_boxes, dets[m:m + 1, :4])[:, 0] if len(gt_boxes) else np.zeros(0)
@@ -100,20 +124,28 @@ class BoxMetrics(object):
                 matched.add(max(cand)[1])
             self.pred_conf.append(float(dets[m, 4])); self.pred_tp.append(tp)
 
+    @staticmethod
+    def _object_stats(r, suffix=''):
+        n = len(r)
+        nanmean = lambda xs: float(np.mean(xs)) if len(xs) else float('nan')
+        return {f'recall50{suffix}': float(np.mean([x['tp50'] for x in r])) if n else 0.0,
+                f'coverage_raw{suffix}': float(np.mean([x['coverage_raw'] for x in r])) if n else 0.0,
+                f'coverage_recall99_raw{suffix}': float(np.mean([x['coverage_raw'] >= 0.99 for x in r])) if n else 0.0,
+                f'coverage_roi{suffix}': float(np.mean([x['coverage_roi'] for x in r])) if n else 0.0,
+                f'coverage_recall99_roi{suffix}': float(np.mean([x['coverage_roi'] >= 0.99 for x in r])) if n else 0.0,
+                f'contain_rate{suffix}': float(np.mean([x['contains'] for x in r])) if n else 0.0,
+                f'tightness{suffix}': nanmean([x['tightness'] for x in r if x['contains']]),
+                f'center_offset{suffix}': nanmean([x['offset'] for x in r if not math.isnan(x['offset'])])}
+
     def summary(self):
         r = self.records; n = len(r)
         nanmean = lambda xs: float(np.mean(xs)) if len(xs) else float('nan')
         return {'n_images': self.n_images, 'n_gt': n, 'dets_per_image': self.n_dets / max(self.n_images, 1),
-                'recall50': float(np.mean([x['tp50'] for x in r])) if n else 0.0,
                 'ap50': average_precision(self.pred_conf, self.pred_tp, n),
                 'matched_iou': nanmean([x['iou'] for x in r if x['tp50']]),
-                'coverage_raw': float(np.mean([x['coverage_raw'] for x in r])) if n else 0.0,
-                'coverage_recall99_raw': float(np.mean([x['coverage_raw'] >= 0.99 for x in r])) if n else 0.0,
-                'coverage_roi': float(np.mean([x['coverage_roi'] for x in r])) if n else 0.0,
-                'coverage_recall99_roi': float(np.mean([x['coverage_roi'] >= 0.99 for x in r])) if n else 0.0,
-                'contain_rate': float(np.mean([x['contains'] for x in r])) if n else 0.0,
-                'tightness': nanmean([x['tightness'] for x in r if x['contains']]),
-                'center_offset': nanmean([x['offset'] for x in r if not math.isnan(x['offset'])])}
+                **self._object_stats(r),
+                'dets_per_image_op': self.n_dets_op / max(self.n_images, 1),
+                **self._object_stats(self.records_op, '_op')}
 
 
 def select_score(summary):

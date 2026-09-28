@@ -36,9 +36,14 @@ def test_train_and_evaluate_one_epoch_on_cpu(synthetic_root, tmp_path):
     logger = TrainLogger(types.SimpleNamespace(name='t', wandb=False, runs_dir=str(tmp_path / 'runs'), rank=0), cfg={})
     stats = train_one_epoch(model, _loader(root), opt, torch.device('cpu'), epoch=0, scaler=None, accumulate=2, logger=logger, print_freq=1)
     assert {'loss', 'box_loss', 'cls_loss', 'gate_entropy', 'contain_loss', 'lr'} <= set(stats) and np.isfinite(stats['loss'])
-    summary = evaluate(model, _loader(root, 'test'), torch.device('cpu'), roi_margin=1.5, roi_min=0, min_area=10, logger=logger, epoch=0, tag='val', amp=False)
+    summary = evaluate(model, _loader(root, 'test'), torch.device('cpu'), roi_margin=1.5, roi_min=0, min_area=10,
+                       roi_conf=0.25, roi_topk=5, logger=logger, epoch=0, tag='val', amp=False)
     for k in ['recall50', 'ap50', 'coverage_raw', 'coverage_recall99_raw', 'coverage_roi', 'tightness', 'center_offset', 'dets_per_image']:
         assert k in summary
+    for k in ['recall50', 'coverage_raw', 'coverage_recall99_raw', 'coverage_roi', 'coverage_recall99_roi',
+              'contain_rate', 'tightness', 'center_offset', 'dets_per_image']:
+        assert k + '_op' in summary                                   # the ROI operating point, threaded from cfg
+    assert summary['dets_per_image_op'] <= 5 and summary['dets_per_image_op'] <= summary['dets_per_image']
     assert summary['n_images'] == 1 and summary['n_gt'] == 1
     logger.finish()
 

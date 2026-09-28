@@ -7,4 +7,7 @@ iou_thres: 0.6                # NMS IoU
 max_det: 300
 roi_margin: 1.5               # Stage-2 crop = box grown 1.5x about its centre ...
 roi_min: 256                  # ... and at least 256 px per side
+roi_conf: 0.25                # ROI operating point: confidence floor for the boxes handed to Stage 2 ...
+roi_topk: 5                   # ... and how many of them per frame. main_det_rois exports exactly this subset,
+                              # and evaluate reports the *_op metrics on it (main_det_rois --max-rois overrides roi_topk)
 min_area: 100                 # GT mask components below this many pixels are JPEG specks, not objects (tests use 10)

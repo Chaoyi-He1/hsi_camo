@@ -5,8 +5,8 @@ from PIL import Image, ImageDraw
 
 from util.misc import MetricLogger, SmoothedValue
 from models.ec_yolo import decode_predictions
-from train_eval.box_metrics import BoxMetrics
-from data_loader.boxes import expand_box, yolo_to_xyxy, boxes_from_mask
+from train_eval.box_metrics import BoxMetrics, filter_to_operating_point
+from data_loader.boxes import expand_box, boxes_from_mask
 
 
 def random_flips(img, bboxes, batch_idx, p=0.5, generator=None):
@@ -87,9 +87,9 @@ def draw_boxes(img_uint8, boxes, color, width=3, dashed=False):
 
 @torch.no_grad()
 def evaluate(model, data_loader, device, conf_thres=0.001, iou_thres=0.6, max_det=300, roi_margin=1.5, roi_min=256,
-             min_area=100, logger=None, epoch=0, tag='val', n_images_log=4, amp=True):
+             min_area=100, roi_conf=0.25, roi_topk=5, logger=None, epoch=0, tag='val', n_images_log=4, amp=True):
     model.eval()
-    metrics = BoxMetrics(roi_margin=roi_margin, roi_min=roi_min, min_area=min_area)
+    metrics = BoxMetrics(roi_margin=roi_margin, roi_min=roi_min, min_area=min_area, roi_conf=roi_conf, roi_topk=roi_topk)
     metric_logger = MetricLogger(delimiter="; ")
     logged = 0
     for batch in metric_logger.log_every(data_loader, 10, f'Eval {tag}:'):
@@ -107,7 +107,7 @@ def evaluate(model, data_loader, device, conf_thres=0.001, iou_thres=0.6, max_de
                     y = model.filter_bank(model.pad_to_stride(img[b:b + 1])[0])[0, :, :H, :W]
                 pic = false_colour(y)
                 pic = draw_boxes(pic, boxes_from_mask(mask, min_area=min_area), (0, 255, 0))
-                top = d[d[:, 4] >= 0.25][:5]
+                top = filter_to_operating_point(d, roi_conf, roi_topk)       # the boxes the ROI export would keep
                 pic = draw_boxes(pic, top[:, :4], (255, 0, 0))
                 pic = draw_boxes(pic, [expand_box(p, roi_margin, roi_min, H, W) for p in top[:, :4]], (255, 255, 0), dashed=True)
                 logger.image(f'{tag}/frame_{batch["names"][b]}', pic, epoch); logged += 1

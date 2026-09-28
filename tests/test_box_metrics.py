@@ -3,7 +3,10 @@ import numpy as np
 import pytest
 
 from train_eval.box_metrics import (box_iou_matrix, match_greedy, mask_coverage, contains, tightness, center_offset,
-                                    average_precision, BoxMetrics, select_score)
+                                    average_precision, filter_to_operating_point, BoxMetrics, select_score)
+
+OP_KEYS = ['coverage_raw', 'coverage_recall99_raw', 'coverage_roi', 'coverage_recall99_roi',
+           'contain_rate', 'tightness', 'center_offset', 'recall50', 'dets_per_image']
 
 H, W = 48, 40
 
@@ -56,3 +59,38 @@ def test_box_metrics_cases():
     two.update(m2, np.array([[20, 10, 30, 20, 0.9, 0], [2, 30, 12, 40, 0.8, 0], [0, 0, 3, 3, 0.7, 0]], np.float32))
     s = two.summary(); assert s['n_gt'] == 2 and s['recall50'] == 1 and s['ap50'] == pytest.approx(1.0) and s['dets_per_image'] == 3
     assert select_score(s) == (s['coverage_recall99_raw'], s['tightness'])
+
+
+def test_filter_to_operating_point():
+    d = np.array([[0, 0, 1, 1, 0.1, 0], [0, 0, 1, 1, 0.9, 0], [0, 0, 1, 1, 0.4, 0]], np.float32)
+    assert filter_to_operating_point(d, 0.25, 5)[:, 4].tolist() == pytest.approx([0.9, 0.4])   # conf floor, then sorted
+    assert filter_to_operating_point(d, 0.25, 1)[:, 4].tolist() == pytest.approx([0.9])        # top-k truncation
+    assert filter_to_operating_point(d, 1.0, 5).shape == (0, 6)
+    assert filter_to_operating_point(np.zeros((0, 6), np.float32), 0.25, 5).shape == (0, 6)
+
+
+def test_operating_point_metrics_ignore_low_confidence_detections():
+    '''An object covered only by a sub-threshold box counts in the raw metrics but not at the ROI operating point.'''
+    m = _mask()
+    b = BoxMetrics(roi_margin=1.5, roi_min=0, roi_conf=0.25, roi_topk=5)
+    b.update(m, _det(20, 10, 30, 20, conf=0.1))                          # a perfect box, below the export threshold
+    s = b.summary()
+    assert s['n_gt'] == 1 and s['dets_per_image'] == 1 and s['recall50'] == 1 and s['coverage_recall99_raw'] == 1
+    assert s['dets_per_image_op'] == 0 and s['recall50_op'] == 0 and s['coverage_recall99_raw_op'] == 0
+    assert s['coverage_raw_op'] == 0 and s['coverage_roi_op'] == 0 and s['coverage_recall99_roi_op'] == 0
+    assert s['contain_rate_op'] == 0 and math.isnan(s['tightness_op']) and math.isnan(s['center_offset_op'])
+    assert s['ap50'] == 1 and not {'ap50_op', 'n_gt_op', 'n_images_op', 'matched_iou_op'} & set(s)
+    assert select_score(s) == (s['coverage_recall99_raw'], s['tightness'])   # selection untouched by the _op keys
+
+
+def test_operating_point_metrics_equal_the_plain_ones_when_all_dets_pass():
+    m = _mask().copy(); m[30:40, 2:12] = True                            # two objects
+    dets = np.array([[20, 10, 30, 20, 0.9, 0], [2, 30, 12, 40, 0.8, 0], [0, 0, 3, 3, 0.7, 0]], np.float32)
+    b = BoxMetrics(roi_margin=1.0, roi_min=0, roi_conf=0.25, roi_topk=5)
+    b.update(m, dets); s = b.summary()
+    for k in OP_KEYS:
+        a, o = s[k], s[k + '_op']
+        assert (math.isnan(a) and math.isnan(o)) or a == o, f"{k}: {a} != {o}"
+    trunc = BoxMetrics(roi_margin=1.0, roi_min=0, roi_conf=0.25, roi_topk=2)
+    trunc.update(m, dets); st = trunc.summary()
+    assert st['dets_per_image'] == 3 and st['dets_per_image_op'] == 2   # the 0.7 spurious box is cut by top-k
