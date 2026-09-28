@@ -4,6 +4,7 @@ import torch
 import pytest
 
 import main_det
+from models.ec_yolo import ECYolo
 from util.distributed_util import Custom_DistributedSampler
 from data_loader.cube_cache import build_cube_cache, default_cache_dir
 
@@ -52,3 +53,26 @@ def test_sessions_a_then_b_and_eval(synthetic_root, tmp_path, monkeypatch):
     main_det.main(_args(root, tmp_path, **{'--session': 'B', '--name': 'tB_eval', '--output-dir': str(out_b), '--top_k': '3',
                                            '--resume': str(out_b / 'model_best'), '--eval': None}))
     assert (out_b / 'results_tB_eval.txt').exists()
+
+
+def test_same_session_resume_keeps_best_and_loss_schedule(synthetic_root, tmp_path, monkeypatch):
+    root, _, _ = synthetic_root
+    build_cube_cache(str(root), 'train', num_workers=0); build_cube_cache(str(root), 'test', num_workers=0)
+    monkeypatch.delenv('RANK', raising=False)
+    out = tmp_path / 'det_R'
+    main_det.main(_args(root, tmp_path, **{'--session': 'A', '--name': 'r0', '--output-dir': str(out), '--top_k': '3'}))
+    ck = torch.load(out / 'model_0', map_location='cpu', weights_only=False)
+    assert 'best' in ck and len(ck['best']) == 2
+    ck['best'] = [1.0, 1.0]                                            # unbeatable: nothing after the resume may top it
+    torch.save(ck, out / 'model_0')
+    best_bytes = (out / 'model_best').read_bytes()
+
+    calls = []
+    real_end_epoch = ECYolo.end_epoch
+    monkeypatch.setattr(ECYolo, 'end_epoch', lambda self: (calls.append(1), real_end_epoch(self))[1])
+    main_det.main(_args(root, tmp_path, **{'--session': 'A', '--name': 'r1', '--output-dir': str(out), '--top_k': '3',
+                                           '--resume': str(out / 'model_0'), '--epochs': '2'}))
+    rec = json.loads((out / 'results_r1.txt').read_text().strip().splitlines()[0])
+    assert rec['epoch'] == 1 and rec['best'] == [1.0, 1.0]             # carried over, not re-initialised to (-1, -1)
+    assert (out / 'model_best').read_bytes() == best_bytes             # the pre-resume best was not clobbered
+    assert len(calls) == 2                                             # 1 replayed epoch + 1 trained epoch

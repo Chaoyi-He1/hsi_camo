@@ -173,11 +173,12 @@ def build_model(args, dataset_train, ckpt=None):
     return model
 
 
-def save_checkpoint(path, model, optimizer, scaler, scheduler, epoch, args):
+def save_checkpoint(path, model, optimizer, scaler, scheduler, epoch, args, best=(-1.0, -1.0)):
     utils.save_on_master({'model': model.state_dict(), 'optimizer': optimizer.state_dict() if optimizer else None,
                           'scaler': scaler.state_dict() if scaler else None, 'lr_scheduler': scheduler.state_dict() if scheduler else None,
                           'epoch': epoch, 'args': vars(args), 'selected_indices': list(model.selected_indices),
-                          'selected_voltages': [float(v) for v in model.selected_voltages]}, path)
+                          'selected_voltages': [float(v) for v in model.selected_voltages],
+                          'best': [float(v) for v in best]}, path)
 
 
 def main(args):
@@ -217,11 +218,20 @@ def main(args):
     if args.amp is False and device.type == 'cuda':
         print("AMP kept on: full-resolution fp16 is required on CUDA")
     scaler = torch.amp.GradScaler('cuda') if use_amp else None
+    best = (-1.0, -1.0)
     if ckpt is not None and ckpt['args'].get('session') == args.session and not args.eval and ckpt.get('optimizer'):
         optimizer.load_state_dict(ckpt['optimizer']); scheduler.load_state_dict(ckpt['lr_scheduler'])
         if scaler is not None and ckpt.get('scaler'):
             scaler.load_state_dict(ckpt['scaler'])
         args.start_epoch = ckpt['epoch'] + 1
+        # carry the best score over: without it the first post-resume epoch always beats (-1, -1) and overwrites
+        # model_best with a worse model. .get() keeps checkpoints written before this field loadable.
+        best = tuple(ckpt.get('best', (-1.0, -1.0)))
+    if not args.eval and args.start_epoch:
+        # E2ELoss decays its one2many/one2one gains once per epoch (ECYolo.end_epoch -> criterion.update()), but
+        # attach_criterion() above rebuilt the criterion at update 0; replay the epochs already trained.
+        for _ in range(args.start_epoch):
+            model_without_ddp.end_epoch()
 
     eval_kw = dict(conf_thres=args.conf_thres, iou_thres=args.iou_thres, max_det=args.max_det, roi_margin=args.roi_margin, roi_min=args.roi_min,
                    min_area=args.min_area, amp=scaler is not None)
@@ -234,7 +244,7 @@ def main(args):
                 f.write(json.dumps({'eval': True, 'resume': args.resume, 'val': val, 'test': test}) + '\n')
         logger.finish(); return
 
-    print("Start training"); start = time.time(); best = (-1.0, -1.0)
+    print(f"Start training from epoch {args.start_epoch}, best so far {best}"); start = time.time()
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             sampler_train.set_epoch(epoch)
@@ -248,10 +258,10 @@ def main(args):
             order = np.argsort(-w)[:20]; logger.table('gate/top20', ['rank', 'voltage', 'weight'], [[r + 1, float(volts[i]), float(w[i])] for r, i in enumerate(order)], epoch)
         score = select_score(val)
         if utils.is_main_process():
+            if score > best:                                     # before model_{epoch}, so it stores the best including this epoch
+                best = score; save_checkpoint(os.path.join(args.output_dir, 'model_best'), model_without_ddp, optimizer, scaler, scheduler, epoch, args, best)
             if (epoch + 1) % args.save_every == 0 or epoch + 1 == args.epochs:
-                save_checkpoint(os.path.join(args.output_dir, f'model_{epoch}'), model_without_ddp, optimizer, scaler, scheduler, epoch, args)
-            if score > best:
-                best = score; save_checkpoint(os.path.join(args.output_dir, 'model_best'), model_without_ddp, optimizer, scaler, scheduler, epoch, args)
+                save_checkpoint(os.path.join(args.output_dir, f'model_{epoch}'), model_without_ddp, optimizer, scaler, scheduler, epoch, args, best)
             with open(results_path, 'a') as f:
                 f.write(json.dumps({'epoch': epoch, 'train': train_stats, 'val': val, 'best': list(best)}) + '\n')
     print(f"Training time {datetime.timedelta(seconds=int(time.time() - start))}, best (coverage_recall99, tightness) = {best}")
