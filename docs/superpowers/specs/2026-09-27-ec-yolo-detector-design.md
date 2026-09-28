@@ -173,6 +173,30 @@ Asserts with f-string messages (project style): cache file missing → message w
 - **Weight-vector parameterisation:** `N·softmax(θ)` + entropy penalty is the default; plain `(1, N, 1, 1)` parameter + L1 is a two-line alternative if preferred.
 - **Stage 2 (segmentation on ROIs):** separate spec; consumes `results/det/rois_*.json` and the existing crop loader with explicit windows; repeats all-344 → top-10.
 
+## 12. Results (Task 11, 2026-09-28/29)
+
+**Training infrastructure findings.** (1) Full-frame reads must bypass the page cache: inside the training process, mmap or `read()` of the 0.55 GB fp16 frames stalled every DataLoader worker in kernel memory reclaim (memory PSI ≈ 70 %, disk idle), 8–17 s/step; `cube_cache.read_npy_direct` (O_DIRECT) gives a steady ≈ 2 s/step, disk-bound at ≈ 380 MB/s on the SATA SSD (4.2 min/epoch + 30 s val). (2) The gate logits need their own learning rate (`gate_lr` 2e-2): at the model's 1e-4 the 344-way softmax never left uniform (normalised entropy 1.0000 after 12 epochs). (3) `DetectionModel` must be told `end2end = True` or eval runs the one-to-many head + NMS (time-limit warnings at native resolution). (4) Only one full-resolution job fits on the box at a time (two jobs re-trigger the reclaim stall).
+
+**Session A (`det_A` run #6, 100 epochs, 7 h 50 min, W&B run `3nfbc5md`).** Gate: normalised entropy 1.00 → 0.943, weights 0.15–6.65 (33× spread). **Top-10 voltages** (converged gate, identical at epochs 89 and 99): `1.32, 1.29, 1.35, -0.41, -0.38, 1.38, -0.44, 1.41, 1.26, -0.35 V` — two clusters (1.26–1.41 V, −0.35 to −0.44 V); weights 6.65 … 3.80 at ranks 1–10, 3.66 at rank 11, 1.77 at rank 50, 1.07 at rank 100 (`weights/det_A/gate_ranking_ep89.csv`, `top_k_ep89.json`).
+
+*Checkpoint selection deviation.* The spec's rule `(coverage_recall99_raw, tightness)` is computed over all decoded candidates (conf ≥ 0.001, ≤ 300/frame) and is confidence-blind: it selected **epoch 0** (`coverage_recall99_raw` 0.645 from 300 untrained boxes, recall50 0). `cfg select_keys` now defaults to the ROI operating-point pair `(coverage_recall99_roi_op, recall50_op)` — the boxes Stage 2 receives — and the spec pair remains selectable. Session B was initialised from `model_89`, the best saved checkpoint under that pair; the best epoch overall was 75 (0.452), not saved (`save_every` 10).
+
+*ROI operating point.* Calibrated on `model_99` (val): the confidence of the box matched to each object has median 0.003 and 29 % of objects have no candidate at all; `roi_conf` 0.25 keeps 35 % of objects inside an exported ROI (0.46 boxes/frame), 0.10 → 52 % (0.82), 0.05 → 55 % (1.07), **0.02 → 58 % (1.46, chosen)**, 0.001 (top-5 only) → 65 % (2.61).
+
+| Session A, `model_89` | val (28 fr / 31 obj) | test (70 fr / 71 obj) |
+|---|---|---|
+| recall50 / AP50 | 0.452 / 0.300 | 0.563 / 0.444 |
+| matched IoU | 0.727 | 0.722 |
+| coverage_recall99_raw / _roi (all candidates) | 0.387 / 0.613 | 0.366 / 0.690 |
+| tightness / center_offset (all candidates) | 0.490 / 0.288 | 0.449 / 0.271 |
+| recall50_op / coverage_recall99_roi_op (conf ≥ 0.02, top 5) | 0.387 / 0.548 | 0.493 / 0.549 |
+| contain_rate_op / tightness_op / center_offset_op | 0.226 / 0.543 / 0.096 | 0.183 / 0.565 / 0.077 |
+| candidates per frame (conf ≥ 0.001 / operating point) | 5.9 / 1.21 | 4.6 / 1.16 |
+
+Best single-epoch val values during A (all candidates): recall50 0.58 (ep 44), AP50 0.42 (ep 70), coverage_recall99_roi 0.74 (ep 30); at the operating point coverage_recall99_roi_op 0.45 (ep 75).
+
+**Session B (`det_B`, top-10 voltages, initialised from A `model_89`, W&B `sx6olkal`):** running; results and the ROI export (`results/det/rois_{train,test}.json`) are appended below when finished.
+
 ## 11. Out of scope
 
 Downsampling, multi-scale/mosaic augmentation, other YOLO sizes or the `-p2` head (no pretrained weights), DDP tuning beyond Spec_Occu's pattern, Stage 2 implementation.
