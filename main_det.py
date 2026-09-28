@@ -107,9 +107,19 @@ def load_cfg(args):
     return cfg
 
 
+def dataset_kwargs(args):
+    '''
+    HyperCOD_data kwargs shared by training and the ROI export (main_det_rois), so both read the same fp16 cache
+    (~0.3 s/frame instead of 9.5 s through h5py) and the same numeric path the model was trained on.
+    '''
+    return dict(data_path=args.data_path, use_filter=False, norm='p99', crop_size=0, out_dtype='float16',
+                cache_dir=args.cache_dir or default_cache_dir(args.data_path),
+                band_range=tuple(args.band_range), filter_path=args.filter_path, num_filters=args.num_filters,
+                filter_select=args.filter_select, filter_voltages=args.filter_voltages, filter_norm='l1')
+
+
 def build_datasets(args):
-    cache_dir = args.cache_dir or default_cache_dir(args.data_path)
-    # make_det_splits defaults to holding out 28 ids; the real split (~600 train frames) uses that default, but a
+    # make_det_splits defaults to holding out 28 ids; the real split (279 train frames) uses that default, but a
     # tiny fixture (a handful of frames, e.g. the test suite) cannot spare 28 for validation, so cap it to leave
     # at least one id on each side. Deviation from the brief, which calls make_det_splits with no n_val override.
     hsi_dir = os.path.join(args.data_path, 'train', 'hyperspectral')
@@ -121,9 +131,7 @@ def build_datasets(args):
         train_ids, val_ids = train_ids[:args.limit], val_ids[:max(1, args.limit // 4)]
         test_ids = sorted(os.path.splitext(f)[0] for f in os.listdir(os.path.join(args.data_path, 'test', 'hyperspectral')) if f.endswith('.mat'))
         test_ids = sorted(test_ids, key=int)[:max(1, args.limit)]
-    kw = dict(data_path=args.data_path, use_filter=False, norm='p99', crop_size=0, cache_dir=cache_dir, out_dtype='float16',
-              band_range=tuple(args.band_range), filter_path=args.filter_path, num_filters=args.num_filters,
-              filter_select=args.filter_select, filter_voltages=args.filter_voltages, filter_norm='l1')
+    kw = dataset_kwargs(args)
     return (HyperCOD_data(split='train', ids=train_ids, **kw), HyperCOD_data(split='train', ids=val_ids, **kw),
             HyperCOD_data(split='test', ids=test_ids, **kw))
 

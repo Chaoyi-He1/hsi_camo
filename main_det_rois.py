@@ -34,16 +34,16 @@ def get_args_parser():
 def main(args):
     utils.init_distributed_mode(args)
     main_det.load_cfg(args)
+    assert args.resume, "--resume <detector checkpoint> is required, e.g. --resume weights/det_B/model_best"
     device = torch.device(args.device if args.device == 'cpu' or torch.cuda.is_available() else 'cpu')
-    dataset_train, _, _ = main_det.build_datasets(args)                              # only for the filter matrices
-    kw = dict(data_path=args.data_path, use_filter=False, norm='p99', crop_size=0, cache_dir=args.cache_dir or None, out_dtype='float16',
-              band_range=tuple(args.band_range), filter_path=args.filter_path, num_filters=args.num_filters,
-              filter_select=args.filter_select, filter_voltages=args.filter_voltages, filter_norm='l1')
-    dataset = HyperCOD_data(split=args.split, **kw)
+    # One dataset only, built exactly like the training ones (same cache, same numeric path). It also hands
+    # build_model the filter matrices: filter_bank_tensors() is split-independent (the band statistics always
+    # come from the train split's stats file), so there is no need to build train/val/test just for those.
+    dataset = HyperCOD_data(split=args.split, **main_det.dataset_kwargs(args))
     loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=args.num_workers,
                                          collate_fn=partial(det_collate_fn, min_area=args.min_area))
     ckpt = torch.load(args.resume, map_location='cpu', weights_only=False)
-    model = main_det.build_model(args, dataset_train, ckpt).to(device).eval()
+    model = main_det.build_model(args, dataset, ckpt).to(device).eval()
     out, covered, n_gt = {}, 0, 0
     for batch in loader:
         img = batch['img'].to(device)
