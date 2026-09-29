@@ -1,0 +1,919 @@
+<title>Raw Bands vs EC Responses</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@500;600&display=swap">
+<style>
+/* Layout: a lab-notebook column (68ch prose) with figure plates that widen to 1120px.
+   The chrome is monochrome; the four series colours are the only chroma on the page. */
+:root {
+  --bg: #f2f4f5; --surface: #fcfcfc; --ink: #101418; --ink-2: #49515a; --muted: #767e87;
+  --grid: #e3e6e9; --axis: #c3c8cd; --line: rgba(16, 20, 24, .10); --chip: #e7eaed; --shadow: rgba(16, 20, 24, .12);
+  --c-raw: #2a78d6; --c-a: #eb6834; --c-b: #1baf7a; --c-pca: #eda100;
+  --g1: #aab0b6; --g2: #858c93; --g3: #5a6168;
+  --heat-l: inline; --heat-d: none; --scale-mid: #f0efec;
+  --f-display: "IBM Plex Serif", Georgia, "Times New Roman", serif;
+  --f-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1012; --surface: #1a1b1d; --ink: #eef0f2; --ink-2: #b4bac1; --muted: #858c94;
+    --grid: #2a2d31; --axis: #3b4046; --line: rgba(255, 255, 255, .10); --chip: #25282c; --shadow: rgba(0, 0, 0, .45);
+    --c-raw: #3987e5; --c-a: #d95926; --c-b: #199e70; --c-pca: #c98500;
+    --g1: #555b62; --g2: #7d848b; --g3: #a9afb5;
+    --heat-l: none; --heat-d: inline; --scale-mid: #383835; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1012; --surface: #1a1b1d; --ink: #eef0f2; --ink-2: #b4bac1; --muted: #858c94;
+  --grid: #2a2d31; --axis: #3b4046; --line: rgba(255, 255, 255, .10); --chip: #25282c; --shadow: rgba(0, 0, 0, .45);
+  --c-raw: #3987e5; --c-a: #d95926; --c-b: #199e70; --c-pca: #c98500;
+  --g1: #555b62; --g2: #7d848b; --g3: #a9afb5;
+  --heat-l: none; --heat-d: inline; --scale-mid: #383835; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 16px/1.62 var(--f-body); -webkit-font-smoothing: antialiased; }
+.page { max-width: 1120px; margin: 0 auto; padding-inline: clamp(16px, 4vw, 40px); padding-block: 44px 96px; }
+.prose { max-width: 68ch; }
+.prose p, .prose li { color: var(--ink); }
+p { margin: 0 0 14px; }
+a { color: var(--ink); text-decoration-color: var(--axis); text-underline-offset: 3px; }
+a:hover { text-decoration-color: var(--ink); }
+:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 4px; }
+.eyebrow { font: 500 12px/1.4 var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 14px; }
+h1 { font: 600 clamp(30px, 4.4vw, 46px)/1.1 var(--f-display); letter-spacing: -.012em; text-wrap: balance; margin: 0 0 18px; max-width: 22ch; }
+h2 { font: 600 clamp(22px, 2.6vw, 28px)/1.2 var(--f-display); text-wrap: balance; margin: 72px 0 14px; }
+h3 { font: 600 16px/1.35 var(--f-body); margin: 0; }
+.dek { font-size: 18px; line-height: 1.55; color: var(--ink-2); max-width: 64ch; margin-bottom: 26px; }
+.toc { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 14px; color: var(--muted); padding: 14px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); margin-bottom: 8px; }
+.toc a { color: var(--ink-2); text-decoration: none; }
+.toc a:hover { color: var(--ink); text-decoration: underline; }
+.findings { padding-left: 1.1em; margin: 0 0 22px; }
+.findings li { margin-bottom: 10px; }
+.findings li::marker { color: var(--muted); }
+.num { font-variant-numeric: tabular-nums; }
+.mono { font-family: var(--f-mono); font-size: .92em; }
+.tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 26px 0 8px; }
+.tile { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.tile .t-label { font-size: 13px; line-height: 1.35; color: var(--ink-2); }
+.tile .t-value { font: 600 34px/1.1 var(--f-body); letter-spacing: -.01em; display: flex; align-items: center; gap: 8px; }
+.tile .t-sub { font-size: 12px; color: var(--muted); }
+.swatch { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+figure.plate { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px clamp(14px, 2.2vw, 24px) 18px; margin: 28px 0 30px; min-width: 0; }
+.fig-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 4px; }
+.fig-no { font: 500 12px/1 var(--f-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.fig-title { font: 600 17px/1.35 var(--f-body); }
+.fig-sub { font-size: 14px; color: var(--ink-2); margin: 2px 0 12px; max-width: 80ch; }
+figcaption { font-size: 13.5px; line-height: 1.55; color: var(--ink-2); margin-top: 12px; max-width: 86ch; }
+figcaption b { color: var(--ink); font-weight: 600; }
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; margin: 10px 0 14px; }
+.ctl-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; font-family: var(--f-mono); }
+.seg { display: flex; flex-wrap: wrap; gap: 4px; }
+.seg button { font: 500 13px/1 var(--f-mono); color: var(--ink-2); background: var(--chip); border: 1px solid transparent; border-radius: 999px; padding: 7px 11px; cursor: pointer; font-variant-numeric: tabular-nums; }
+.seg button:hover { color: var(--ink); border-color: var(--axis); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+.check { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--ink-2); cursor: pointer; user-select: none; }
+.check input { width: 15px; height: 15px; accent-color: var(--ink); margin: 0; }
+.check .k { width: 16px; height: 3px; border-radius: 2px; display: inline-block; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--ink-2); margin: 6px 0 2px; }
+.legend span { display: inline-flex; align-items: center; gap: 7px; }
+.legend .k { width: 16px; height: 2px; border-radius: 1px; display: inline-block; }
+.legend .k.area { height: 10px; opacity: .22; border-radius: 2px; }
+.legend .k.dot { width: 9px; height: 9px; border-radius: 50%; }
+.legend .k.sq { width: 10px; height: 10px; border-radius: 2px; }
+.bg-raw { background: var(--c-raw); } .bg-a { background: var(--c-a); } .bg-b { background: var(--c-b); } .bg-pca { background: var(--c-pca); }
+.bg-ink { background: var(--ink); } .bg-muted { background: var(--muted); } .bg-g1 { background: var(--g1); } .bg-g2 { background: var(--g2); } .bg-g3 { background: var(--g3); }
+.row2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 28px; }
+.row3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px 22px; }
+.cell { min-width: 0; }
+.cell-title { font-size: 13px; font-weight: 600; color: var(--ink); margin: 0 0 2px; }
+.cell-sub { font-size: 12px; color: var(--muted); margin: 0 0 4px; }
+.chart { position: relative; width: 100%; }
+.chart svg { display: block; overflow: visible; touch-action: pan-y; }
+.chart text { font: 12px var(--f-body); fill: var(--muted); }
+.chart .tick { font-variant-numeric: tabular-nums; }
+.chart .ttl { fill: var(--ink-2); }
+.chart .lbl { fill: var(--ink-2); font-size: 12px; font-weight: 500; paint-order: stroke; stroke: var(--surface); stroke-width: 3px; stroke-linejoin: round; }
+.chart .lbl-strong { fill: var(--ink); font-weight: 600; }
+.chart .grid { stroke: var(--grid); stroke-width: 1; }
+.chart .base { stroke: var(--axis); stroke-width: 1; }
+.chart .cross { stroke: var(--axis); stroke-width: 1; }
+.chart .hit { fill: transparent; cursor: crosshair; outline: none; }
+.chart .hit:focus-visible { stroke: var(--ink); stroke-width: 1.5; }
+.ln { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.ln-faint { fill: none; stroke-width: 1; opacity: .28; stroke-linejoin: round; }
+.ln-ctx { fill: none; stroke-width: 1; opacity: .55; }
+.band { opacity: .14; stroke: none; }
+.mark-line { stroke: var(--axis); stroke-width: 1; }
+.s-raw { stroke: var(--c-raw); } .s-a { stroke: var(--c-a); } .s-b { stroke: var(--c-b); } .s-pca { stroke: var(--c-pca); }
+.s-ink { stroke: var(--ink); } .s-muted { stroke: var(--muted); } .s-g1 { stroke: var(--g1); } .s-g2 { stroke: var(--g2); } .s-g3 { stroke: var(--g3); }
+.f-raw { fill: var(--c-raw); } .f-a { fill: var(--c-a); } .f-b { fill: var(--c-b); } .f-pca { fill: var(--c-pca); }
+.f-ink { fill: var(--ink); } .f-muted { fill: var(--muted); } .f-g1 { fill: var(--g1); } .f-g2 { fill: var(--g2); } .f-g3 { fill: var(--g3); }
+.ring { stroke: var(--surface); stroke-width: 2; }
+.heat-l { display: var(--heat-l); } .heat-d { display: var(--heat-d); }
+.tip { position: absolute; top: 0; left: 0; pointer-events: none; background: var(--surface); color: var(--ink); border: 1px solid var(--line); box-shadow: 0 8px 22px var(--shadow); border-radius: 8px; padding: 8px 10px; font: 12px/1.45 var(--f-body); min-width: 150px; max-width: 260px; z-index: 5; }
+.tip[hidden] { display: none !important; }
+.tip .t-head { color: var(--muted); margin-bottom: 4px; font-variant-numeric: tabular-nums; }
+.tip .t-row { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.tip .t-val { font-weight: 600; font-variant-numeric: tabular-nums; min-width: 44px; }
+.tip .t-name { color: var(--ink-2); }
+.tip .t-key { width: 14px; height: 2px; border-radius: 1px; flex: none; }
+.scalebar { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); margin-top: 8px; flex-wrap: wrap; }
+.scalebar .grad { width: 180px; max-width: 50vw; height: 10px; border-radius: 3px; border: 1px solid var(--line); background: linear-gradient(90deg, #2a78d6, var(--scale-mid, #f0efec) 50%, #e34948); }
+.panels { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px 14px; }
+.ip-note { font-size: 13px; line-height: 1.5; color: var(--ink-2); align-self: start; padding: 2px 2px 0; min-width: 0; }
+.ip-note b { color: var(--ink); font-weight: 600; }
+.ip { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.ip-img { position: relative; aspect-ratio: 1 / 1; border-radius: 6px; overflow: hidden; background: var(--chip); max-width: 100%; }
+.ip-img img { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.ip-img .ol { pointer-events: none; }
+.no-outline .ol { display: none; }
+.ip h3 { font-size: 13px; line-height: 1.3; }
+.ip .ip-sub { font: 12px/1.3 var(--f-mono); color: var(--muted); }
+.meter { height: 4px; border-radius: 2px; background: var(--chip); overflow: hidden; }
+.meter > span { display: block; height: 100%; border-radius: 2px; }
+.ip .ip-val { display: flex; justify-content: space-between; font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.ip .ip-val b { color: var(--ink); font-weight: 600; }
+.dets { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px 16px; }
+.det { min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.det h3 { font-size: 13.5px; }
+.det .det-sub { font-size: 12px; color: var(--muted); font-family: var(--f-mono); }
+.det-img { position: relative; width: 100%; border-radius: 6px; overflow: hidden; background: var(--chip) center / 100% 100% no-repeat; max-width: 100%; }
+.det-img img, .det-img svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.det-img rect { fill: none; stroke-width: 2.5; vector-effect: non-scaling-stroke; }
+.hide-raw .bx-raw, .hide-a .bx-a, .hide-b .bx-b { display: none; }
+.outcome { list-style: none; padding: 0; margin: 0; display: grid; gap: 3px; font-size: 12.5px; }
+.outcome li { display: flex; align-items: center; gap: 7px; color: var(--ink-2); }
+.outcome .k { width: 14px; height: 3px; border-radius: 2px; flex: none; }
+.outcome .res { font-weight: 600; color: var(--ink); min-width: 1.2em; }
+details.data { margin-top: 10px; }
+details.data summary { cursor: pointer; font-size: 13px; color: var(--ink-2); width: max-content; }
+details.data summary:hover { color: var(--ink); }
+.scroll { overflow-x: auto; max-height: 340px; overflow-y: auto; margin-top: 8px; border: 1px solid var(--line); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; font-variant-numeric: tabular-nums; }
+th:first-child, td:first-child { text-align: left; }
+thead th { position: sticky; top: 0; background: var(--surface); color: var(--ink-2); font-weight: 600; z-index: 1; }
+tbody tr:last-child td { border-bottom: 0; }
+.tbl-plain { border: 1px solid var(--line); border-radius: 8px; overflow-x: auto; margin-top: 14px; }
+.yes { color: var(--ink); } .no { color: var(--muted); }
+.note { font-size: 13.5px; color: var(--ink-2); border-left: 2px solid var(--axis); padding: 2px 0 2px 12px; margin: 14px 0; }
+.steps { padding-left: 1.2em; }
+.steps li { margin-bottom: 10px; }
+dl.defs { display: grid; grid-template-columns: minmax(150px, 220px) minmax(0, 1fr); gap: 10px 22px; font-size: 14.5px; margin: 0; }
+dl.defs dt { font-weight: 600; color: var(--ink); }
+dl.defs dd { margin: 0; color: var(--ink-2); }
+footer { margin-top: 64px; padding-top: 18px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); }
+footer p { max-width: 90ch; }
+@media (max-width: 900px) {
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .row3 { grid-template-columns: minmax(0, 1fr); }
+  .panels { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dets { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  .row2 { grid-template-columns: minmax(0, 1fr); }
+  dl.defs { grid-template-columns: minmax(0, 1fr); gap: 2px 0; }
+  dl.defs dd { margin-bottom: 10px; }
+  .tile .t-value { font-size: 28px; }
+}
+@media (max-width: 420px) {
+  .dets { grid-template-columns: minmax(0, 1fr); }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+
+<div class="page">
+<header>
+  <p class="eyebrow">HyperCOD · Stage-1 camouflage detector · 29 September 2026</p>
+  <h1>Why the detector does better on raw bands than on EC filter responses</h1>
+  <p class="dek">Trained on the 133 raw hyperspectral bands, the YOLO26s detector finds 76&nbsp;% of the camouflaged objects in the test set. Fed the 344 responses of the electrochromic (EC) tunable filter instead, it finds 56&nbsp;%. The data explain most of that gap. The filter loses a small part of the spectral signal, and the way its responses reach the network costs far more.</p>
+  <nav class="toc" aria-label="Sections">
+    <a href="#summary">Summary</a><a href="#signal">Where the signal lives</a><a href="#filter">What the filter does</a><a href="#training">Training results</a><a href="#next">What to change</a><a href="#methods">Methods</a>
+  </nav>
+</header>
+
+<section id="summary">
+  <h2>Summary</h2>
+  <div class="prose">
+    <ul class="findings">
+      <li><b>The outcome.</b> On the 70-frame test split, the raw-band detector reaches recall 0.76 at IoU&nbsp;0.5 and puts 76&nbsp;% of the objects fully inside an exported region of interest. The detector on all 344 responses reaches 0.56 and 55&nbsp;%; the one on the gate's top-10 voltages reaches 0.52 and 46&nbsp;%.</li>
+      <li><b>Information is mostly kept.</b> Per pixel, the 344 responses keep a median 93&nbsp;% of the raw bands' object-versus-surround separability (80 to 99&nbsp;% across 12 validation frames). What they lose is narrow spectral detail, such as the 790–800&nbsp;nm red-edge feature that separates the object best in half of the frames. Each response is about 112&nbsp;nm wide, against 3&nbsp;nm bands.</li>
+      <li><b>The input format costs the most.</b> Neighbouring voltages are 0.9998 cosine-similar, and 11 directions hold 99.9&nbsp;% of the response energy. Fed those 344 near-copies, the detector took 37 epochs to reach val AP50&nbsp;0.3, against 11 for the raw bands, and plateaued lower. The same responses re-expressed as 11 whitened principal directions keep 95&nbsp;% of the separability, and a run on that input, still in progress, reached AP50&nbsp;0.3 by epoch 5.</li>
+      <li><b>The learned top-10 is a weak subset.</b> The gate's ten voltages form two bundles of near-identical curves and keep only 61&nbsp;% of the separability. They also exclude 1.73–1.75&nbsp;V, the single most discriminative response in 8 of 12 frames.</li>
+    </ul>
+  </div>
+  <div class="tiles">
+    <div class="tile"><span class="t-label">Test recall at IoU 0.5, raw bands</span><span class="t-value"><span class="swatch bg-raw" aria-hidden="true"></span>0.76</span><span class="t-sub">70 test frames, 71 objects</span></div>
+    <div class="tile"><span class="t-label">Same detector on the 344 EC responses</span><span class="t-value"><span class="swatch bg-a" aria-hidden="true"></span>0.56</span><span class="t-sub">top-10 voltages only: 0.52</span></div>
+    <div class="tile"><span class="t-label">Object–surround separability the responses keep</span><span class="t-value">93&nbsp;%</span><span class="t-sub">median of 12 validation frames</span></div>
+    <div class="tile"><span class="t-label">Directions holding 99.9&nbsp;% of the response energy</span><span class="t-value">11</span><span class="t-sub">out of 344 response channels</span></div>
+  </div>
+</section>
+
+<section id="signal">
+  <h2>Where the camouflage signal lives</h2>
+  <div class="prose">
+    <p>A camouflaged object is hard to see because its colour matches its surround. In the hyperspectral cube it usually still differs somewhere along the spectrum. Figure&nbsp;1 shows, for one validation frame at a time, how visible the object becomes when each input is read out in the best possible single channel or linear combination. Figure&nbsp;2 shows where along the spectrum, and along the filter's voltage axis, the difference sits.</p>
+  </div>
+
+  <figure class="plate" id="fig1">
+    <div class="fig-head"><span class="fig-no">Fig. 1</span><span class="fig-title">What each input makes visible</span></div>
+    <p class="fig-sub">The same crop around the object, shown through each input's most discriminative read-out. Brighter means more object-like.</p>
+    <div class="controls">
+      <span class="ctl-label" id="frame-label">Validation frame</span>
+      <div class="seg" id="frame-seg" role="group" aria-labelledby="frame-label"></div>
+      <label class="check"><input type="checkbox" id="outline-toggle" checked> Outline the object</label>
+    </div>
+    <div class="panels" id="panels"></div>
+    <figcaption id="fig1-cap"><b>Contrast</b> is the Fisher ratio between object pixels and the 3–60&nbsp;px surround, computed on the displayed values; the bar compares each panel with the best mix of the 133 raw bands. The "best mix" panels are the linear discriminant fitted on this frame's own mask, so they show an upper bound on what a linear read-out of each input can show, not what the detector learned.</figcaption>
+  </figure>
+
+  <figure class="plate" id="fig2">
+    <div class="fig-head"><span class="fig-no">Fig. 2</span><span class="fig-title">How well each single channel separates object from surround</span></div>
+    <p class="fig-sub">Fisher ratio per raw band (left) and per EC response (right), on the same scale. The line is the frame selected in Figure&nbsp;1; the shaded band is the middle half of all 12 validation frames.</p>
+    <div class="legend" id="fig2-legend"></div>
+    <div class="row2">
+      <div class="cell"><p class="cell-title">Raw bands</p><p class="cell-sub">400–800 nm, 133 bands, 3.0 nm apart</p><div class="chart" id="c-fisher-raw"></div></div>
+      <div class="cell"><p class="cell-title">EC responses</p><p class="cell-sub">344 usable voltages, −1.00 to 2.50 V</p><div class="chart" id="c-fisher-resp"></div></div>
+    </div>
+    <figcaption>In most frames the best raw band sits at 790–800&nbsp;nm, the red edge at the top of the 400–800&nbsp;nm window (6 of 12 frames), and the best response at 1.73–1.75&nbsp;V (8 of 12). The response curve is smoother and its peak is lower, because every response sums a broad stretch of the spectrum. Short aqua ticks at the top of the right chart mark the gate's top-10 voltages.</figcaption>
+    <details class="data"><summary>Data table</summary><div class="scroll" id="t-fisher"></div></details>
+  </figure>
+</section>
+
+<section id="filter">
+  <h2>What the EC filter does to a spectrum</h2>
+  <div class="prose">
+    <p>Each of the 344 usable bias voltages gives the detector one number per pixel: the scene spectrum weighted by that voltage's responsivity curve. Figure&nbsp;3 shows all 344 curves. They are broad (median 112&nbsp;nm at half maximum, up to 311&nbsp;nm), they change slowly with voltage, and they flip sign near 0.27&nbsp;V. Figures&nbsp;4 to 6 measure what that does to the information.</p>
+  </div>
+
+  <figure class="plate" id="fig3">
+    <div class="fig-head"><span class="fig-no">Fig. 3</span><span class="fig-title">The EC responsivity matrix and the gate's top-10 voltages</span></div>
+    <p class="fig-sub">Left: responsivity of every voltage across the cube's wavelengths, each column scaled to its own peak. Right: the ten voltages the session-A gate ranked highest, with every 24th voltage in grey for context.</p>
+    <div class="row2">
+      <div class="cell"><div class="chart" id="c-heat"></div>
+        <div class="scalebar"><span>−1</span><span class="grad" aria-hidden="true"></span><span>+1</span><span>peak-normalised responsivity</span></div></div>
+      <div class="cell"><div class="legend" id="fig3-legend"></div><div class="chart" id="c-top10"></div></div>
+    </div>
+    <figcaption>The ten selected voltages are two bundles, 1.26–1.41&nbsp;V and −0.44 to −0.35&nbsp;V, and within each bundle the curves are nearly the same shape. The curve at 1.74&nbsp;V, the most discriminative single response in Figure&nbsp;2, is not among them. The blank column near 0.28&nbsp;V is the dead zone (0.25–0.31&nbsp;V) excluded from the data.</figcaption>
+  </figure>
+
+  <figure class="plate" id="fig4">
+    <div class="fig-head"><span class="fig-no">Fig. 4</span><span class="fig-title">How many independent spectral directions each side needs</span></div>
+    <p class="fig-sub">Energy left after keeping the first k principal directions, on a log scale: of the filter's responsivity matrix, and of the scene spectra themselves.</p>
+    <div class="legend" id="fig4-legend"></div>
+    <div class="chart" id="c-rank"></div>
+    <figcaption>Eleven directions hold 99.9&nbsp;% of what the 344 responses measure (6 hold 99&nbsp;%). The scene spectra are also dominated by a few smooth shapes, 5 directions for 99&nbsp;%, but reaching 99.9&nbsp;% takes 81. That last fraction of a percent is fine spectral structure, and it is where a camouflaged object can still differ from its surround. The filter cannot measure it.</figcaption>
+    <details class="data"><summary>Data table</summary><div class="scroll" id="t-rank"></div></details>
+  </figure>
+
+  <figure class="plate" id="fig5">
+    <div class="fig-head"><span class="fig-no">Fig. 5</span><span class="fig-title">An object's spectral difference, and what the filter can represent of it</span></div>
+    <p class="fig-sub">Mean spectrum of the object minus mean spectrum of its surround (blue), and the closest curve the 11 main filter directions can express (orange). Frame <span id="fig5-frame" class="num"></span> is selected in Figure&nbsp;1.</p>
+    <div class="legend" id="fig5-legend"></div>
+    <div class="chart" id="c-recon"></div>
+    <figcaption id="fig5-cap">Values are in the model's input units (each frame divided by its 99th-percentile intensity). The filter keeps the broad shape of the difference but smooths away narrow features, most visibly near the top of the window.</figcaption>
+  </figure>
+
+  <figure class="plate" id="fig6">
+    <div class="fig-head"><span class="fig-no">Fig. 6</span><span class="fig-title">Object–surround separability kept by each input</span></div>
+    <p class="fig-sub">Mahalanobis distance between object and surround pixels, as a percentage of the raw bands' distance. Each grey line is one validation frame; the dark line is the median.</p>
+    <div class="chart" id="c-slope"></div>
+    <figcaption>This distance does not change under any invertible linear transform, so it measures information, not presentation. The 344 responses keep 93&nbsp;% (median), and their 11 whitened principal directions keep 95&nbsp;% (fewer channels also means less estimation noise, so they can score slightly higher). The learned top-10 keeps 61&nbsp;%, and as little as 30&nbsp;% on frame 30. Measured against the whole background instead of the surround, the medians are 88, 93 and 52&nbsp;%.</figcaption>
+    <details class="data"><summary>Data table</summary><div class="scroll" id="t-slope"></div></details>
+  </figure>
+</section>
+
+<section id="training">
+  <h2>How it played out in training</h2>
+  <div class="prose">
+    <p>All runs use YOLO26s at native 1680×1240 resolution with the same recipe: 100 epochs, batch 2 with 4-step accumulation, AdamW at 1e-4 with a cosine schedule. They differ only in the input. Session A feeds all 344 responses through a trainable weight vector (the gate). Session B keeps the gate's top-10 voltages and starts from session A's epoch-89 weights. The raw control feeds the 133 bands directly. The PCA-11 run feeds 11 whitened principal directions of the responses; it was started later and is still training.</p>
+  </div>
+
+  <figure class="plate" id="fig7">
+    <div class="fig-head"><span class="fig-no">Fig. 7</span><span class="fig-title">Validation metrics per epoch</span></div>
+    <p class="fig-sub">28 validation frames, 31 objects. Lines are 5-epoch centred means; the faint lines are the per-epoch values, which the tooltip reports.</p>
+    <div class="legend" id="fig7-legend"></div>
+    <div class="row3">
+      <div class="cell"><p class="cell-title">AP50</p><div class="chart" id="c-tr-ap"></div></div>
+      <div class="cell"><p class="cell-title">Recall at IoU 0.5</p><div class="chart" id="c-tr-rec"></div></div>
+      <div class="cell"><p class="cell-title">Objects fully inside an exported ROI</p><div class="chart" id="c-tr-roi"></div></div>
+    </div>
+    <figcaption>The raw bands reach smoothed AP50&nbsp;0.3 at epoch 11; the 344 responses need 37 epochs and level off near 0.34, against 0.67 for the raw bands (means of the last 10 epochs). Session B starts high because it inherits session A's weights, then drifts down as it adapts to 10 channels. The PCA-11 run crosses 0.3 at epoch 5, which points at the input format rather than the sensor as the main cost; its final level is not known yet.</figcaption>
+    <details class="data"><summary>Data table</summary><div class="scroll" id="t-train"></div></details>
+  </figure>
+
+  <figure class="plate" id="fig8">
+    <div class="fig-head"><span class="fig-no">Fig. 8</span><span class="fig-title">How the session-A gate distributed its weight over voltages</span></div>
+    <p class="fig-sub">Gate weight per voltage (mean 1 across the 344) at four epochs.</p>
+    <div class="legend" id="fig8-legend"></div>
+    <div class="chart" id="c-gate"></div>
+    <figcaption>The gate grew two peaks, at 1.26–1.41&nbsp;V and near −0.4&nbsp;V, and these became the top-10. It needed its own learning rate (2e-2) to move at all; at the model's 1e-4 it stayed uniform for 12 epochs in an earlier run. The gate rewards whichever channels the network happens to lean on while it trains, which is not the same as the channels that carry the most object–surround information (1.74&nbsp;V, marked). The zig-zag between neighbouring voltages is the redundancy problem made visible: two near-identical channels can trade weight at no cost to the loss, so the gate alternates between them.</figcaption>
+  </figure>
+
+  <figure class="plate" id="fig9">
+    <div class="fig-head"><span class="fig-no">Fig. 9</span><span class="fig-title">Test-set results of the selected checkpoints</span></div>
+    <p class="fig-sub">70 test frames, 71 objects; each checkpoint was chosen on validation by ROI coverage, then recall, of its exported boxes.</p>
+    <div class="legend" id="fig9-legend"></div>
+    <div class="chart" id="c-bars"></div>
+    <figcaption>"All boxes" metrics count every candidate at confidence ≥&nbsp;0.001; "exported" metrics count only what Stage&nbsp;2 receives (confidence ≥&nbsp;0.02, top 5 per frame, each box grown 1.5× with a 256&nbsp;px minimum). One test object is 1.4&nbsp;% of the split, so differences of a few points are within noise; the raw-versus-response gap of about 20 points is not.</figcaption>
+    <div class="tbl-plain" id="t-test"></div>
+  </figure>
+
+  <figure class="plate" id="fig10">
+    <div class="fig-head"><span class="fig-no">Fig. 10</span><span class="fig-title">Detections on four test frames</span></div>
+    <p class="fig-sub">Exported boxes of each detector over the colour composite; the white outline is the ground-truth mask.</p>
+    <div class="controls" id="det-toggles"></div>
+    <div class="dets" id="dets"></div>
+    <figcaption>Twelve test frames spread evenly by object size were run through all three detectors before choosing; these four show one frame each where all three find the object, where only the raw model does, where only the top-10 model does, and where all three miss. Across the twelve, the raw model localises 10 objects at IoU&nbsp;≥&nbsp;0.5, the top-10 model 6, and the 344-response model 3.</figcaption>
+    <div class="tbl-plain" id="t-examples"></div>
+  </figure>
+</section>
+
+<section id="next">
+  <h2>What to change</h2>
+  <div class="prose">
+    <ol class="steps">
+      <li><b>Feed a well-conditioned version of the responses, not 344 near-copies.</b> The whitened 11-direction input keeps 95&nbsp;% of the separability and learns at the raw model's pace. If the PCA-11 run ends near the raw model's plateau, adopt that input for Stage&nbsp;2; the remaining gap is then the filter's bandwidth.</li>
+      <li><b>Select voltages by information, not by the gate.</b> For hardware that can read out only a few voltages, pick them greedily to maximise object–surround separability, or to span the principal directions. That would include 1.74&nbsp;V and spread the choice across the voltage range, instead of two bundles of near-duplicates.</li>
+      <li><b>Look past 800&nbsp;nm.</b> The best raw band is the last band of the window in 4 of 12 frames, so the red-edge signal likely continues into the near-infrared. The EC filter has no responsivity there, so this is a sensor-design question.</li>
+      <li><b>Keep the raw control as the ceiling.</b> The deployed sensor delivers responses, not bands, so the raw model is an upper bound on what any read-out of this scene data can reach with this detector and training set.</li>
+    </ol>
+  </div>
+</section>
+
+<section id="methods">
+  <h2>Methods and definitions</h2>
+  <dl class="defs">
+    <dt>Data</dt><dd>HyperCOD cubes restricted to 400–800&nbsp;nm (133 bands, 3.0&nbsp;nm spacing), native 1680×1240 frames. 251 training, 28 validation and 70 test frames. Each frame is divided by its windowed 99th-percentile intensity.</dd>
+    <dt>EC responses</dt><dd>Responsivity from EC_filterV3.mat, 344 usable voltages from −1.00 to 2.50&nbsp;V (0.25–0.31&nbsp;V dead zone excluded), interpolated to the cube bands and L1-normalised per voltage. Response = responsivity-weighted sum of the bands, standardised with training-set band statistics.</dd>
+    <dt>Object and surround</dt><dd>Object pixels are the ground-truth mask eroded by 2&nbsp;px. The surround is every pixel 3–60&nbsp;px outside the mask, the background a camouflaged object has to blend into.</dd>
+    <dt>Fisher ratio</dt><dd>(mean<sub>object</sub> − mean<sub>surround</sub>)² ÷ (variance<sub>object</sub> + variance<sub>surround</sub>) for one channel.</dd>
+    <dt>Separability</dt><dd>Mahalanobis distance between the object and surround means under their pooled covariance, with a ridge of 10⁻³ of the mean eigenvalue. The best linear mix in Figure&nbsp;1 is the matching discriminant direction.</dd>
+    <dt>Effective directions</dt><dd>Singular values of the 133×344 responsivity matrix (Figure&nbsp;4, orange) and eigenvalues of the training-set band covariance (blue); k directions "hold" a fraction when the first k carry it.</dd>
+    <dt>Detector</dt><dd>YOLO26s pretrained on COCO, first convolution rebuilt for the input's channel count, NMS-free one-to-one head. Session A adds the gate N·softmax(θ) with learning rate 2e-2 and an entropy penalty.</dd>
+    <dt>Metrics</dt><dd>Recall and AP50 at IoU&nbsp;0.5 over candidates with confidence ≥&nbsp;0.001. Exported boxes are those with confidence ≥&nbsp;0.02, at most 5 per frame; an object counts as inside an exported ROI when ≥&nbsp;99&nbsp;% of its mask falls inside one box grown 1.5× (minimum 256&nbsp;px).</dd>
+    <dt>Frames analysed</dt><dd>Figures 1, 2, 5 and 6: the first 12 validation frames. Figure&nbsp;10: 12 test frames spaced evenly by object size.</dd>
+  </dl>
+</section>
+
+<footer>
+  <p>Source code and full result tables: <span class="mono">hsi_camo</span>, branch <span class="mono">master</span> at <span class="mono">d2e2fcc</span>, spec <span class="mono">docs/superpowers/specs/2026-09-27-ec-yolo-detector-design.md</span> §12. Training logs: W&amp;B project <span class="mono">chaoyi-hsi/hsi_camo</span>, runs <span class="mono">ku0jkcha</span> (raw bands), <span class="mono">3nfbc5md</span> (session A), <span class="mono">sx6olkal</span> (session B). The PCA-11 numbers are a snapshot of a run still in progress (<span id="pca-epochs" class="num"></span> epochs).</p>
+</footer>
+</div>
+
+<script type="application/json" id="report-data">/*__DATA__*/null</script>
+<script>
+(() => {
+'use strict';
+const D = JSON.parse(document.getElementById('report-data').textContent);
+const NS = 'http://www.w3.org/2000/svg';
+const SER = { raw: { name: 'Raw 133 bands', cls: 'raw' }, A: { name: '344 EC responses', cls: 'a' }, B: { name: 'Learned top-10', cls: 'b' }, pca: { name: 'PCA-11 (in progress)', cls: 'pca' } };
+
+function h(tag, attrs, parent, text) {
+  const e = document.createElement(tag);
+  if (attrs) for (const k in attrs) { if (attrs[k] == null) continue; if (k === 'class') e.className = attrs[k]; else e.setAttribute(k, attrs[k]); }
+  if (text != null) e.textContent = text;
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function s(tag, attrs, parent, text) {
+  const e = document.createElementNS(NS, tag);
+  if (attrs) for (const k in attrs) { if (attrs[k] != null) e.setAttribute(k, attrs[k]); }
+  if (text != null) e.textContent = text;
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function lin(d0, d1, r0, r1) { const f = v => r0 + (v - d0) / (d1 - d0) * (r1 - r0); f.inv = p => d0 + (p - r0) / (r1 - r0) * (d1 - d0); return f; }
+function logsc(d0, d1, r0, r1) {
+  const a = Math.log10(d0), b = Math.log10(d1);
+  const f = v => r0 + (Math.log10(Math.max(v, d0)) - a) / (b - a) * (r1 - r0);
+  f.inv = p => Math.pow(10, a + (p - r0) / (r1 - r0) * (b - a));
+  return f;
+}
+const fx = (v, d) => (v == null || !isFinite(v)) ? '–' : v.toFixed(d);
+const pctf = v => (v == null || !isFinite(v)) ? '–' : (v * 100).toFixed(v < 0.01 ? 2 : v < 0.1 ? 1 : 0) + ' %';
+function niceTicks(lo, hi, n) {
+  const span = hi - lo, step0 = span / n, mag = Math.pow(10, Math.floor(Math.log10(step0))), err = step0 / mag;
+  const step = (err >= 7.5 ? 10 : err >= 3.5 ? 5 : err >= 1.5 ? 2 : 1) * mag;
+  const out = [];
+  for (let v = Math.ceil(lo / step - 1e-9) * step; v <= hi + 1e-9; v += step) out.push(+v.toFixed(10));
+  return out;
+}
+function stepFmt(ticks) { const st = ticks.length > 1 ? Math.abs(ticks[1] - ticks[0]) : 1; const d = Math.max(0, Math.ceil(-Math.log10(st) - 1e-9)); return v => v.toFixed(Math.min(d, 3)); }
+function linePath(xs, ys, X, Y) {
+  let d = '', pen = false;
+  for (let i = 0; i < X.length; i++) {
+    const v = Y[i];
+    if (v == null || !isFinite(v)) { pen = false; continue; }
+    d += (pen ? 'L' : 'M') + xs(X[i]).toFixed(1) + ',' + ys(v).toFixed(1); pen = true;
+  }
+  return d;
+}
+function areaPath(xs, ys, X, lo, hi) {
+  let d = '';
+  for (let i = 0; i < X.length; i++) d += (i ? 'L' : 'M') + xs(X[i]).toFixed(1) + ',' + ys(hi[i]).toFixed(1);
+  for (let i = X.length - 1; i >= 0; i--) d += 'L' + xs(X[i]).toFixed(1) + ',' + ys(lo[i]).toFixed(1);
+  return d + 'Z';
+}
+function nearestIdx(arr, v) { let best = 0, bd = Infinity; for (let i = 0; i < arr.length; i++) { const dd = Math.abs(arr[i] - v); if (dd < bd) { bd = dd; best = i; } } return best; }
+function wlColor(nm) {
+  let r = 0, g = 0, b = 0;
+  if (nm < 440) { r = (440 - nm) / 60; b = 1; } else if (nm < 490) { g = (nm - 440) / 50; b = 1; }
+  else if (nm < 510) { g = 1; b = (510 - nm) / 20; } else if (nm < 580) { r = (nm - 510) / 70; g = 1; }
+  else if (nm < 645) { r = 1; g = (645 - nm) / 65; } else { r = 1; }
+  const f = nm < 420 ? 0.35 + 0.65 * (nm - 400) / 20 : nm <= 700 ? 1 : Math.max(0.16, 1 - (nm - 700) / 100 * 0.84);
+  const c = v => Math.round(255 * Math.pow(Math.max(0, v * f), 0.8));
+  return `rgb(${c(r)},${c(g)},${c(b)})`;
+}
+
+// ---- responsive mounting: charts re-render at their container's real pixel width
+const redraws = new Map();
+function mount(host, fn) {
+  const r = force => { const w = Math.round(host.clientWidth); if (!w || (!force && w === host._w)) return; host._w = w; fn(host, w); };
+  redraws.set(host, r);
+  new ResizeObserver(() => r(false)).observe(host);
+  r(true);
+}
+function redraw(host) { const r = redraws.get(host); if (r) r(true); }
+
+function tooltip(wrap) { return h('div', { class: 'tip', hidden: '' }, wrap); }
+function fillTip(tip, head, rows) {
+  tip.replaceChildren();
+  h('div', { class: 't-head' }, tip, head);
+  for (const r of rows) {
+    const row = h('div', { class: 't-row' }, tip);
+    if (r.cls) h('span', { class: 't-key bg-' + r.cls }, row);
+    h('span', { class: 't-val' }, row, r.val);
+    h('span', { class: 't-name' }, row, r.name);
+  }
+}
+function placeTip(tip, wrap, px, py) {
+  tip.hidden = false;
+  const W = wrap.clientWidth, tw = tip.offsetWidth, th = tip.offsetHeight;
+  let x = px + 14; if (x + tw > W) x = px - tw - 14; if (x < 0) x = Math.max(0, Math.min(W - tw, px - tw / 2));
+  let y = py - th - 10; if (y < 0) y = py + 16;
+  tip.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+}
+function legend(el, items) {
+  el.replaceChildren();
+  for (const it of items) { const sp = h('span', null, el); h('span', { class: 'k ' + (it.kind || '') + ' bg-' + it.cls, 'aria-hidden': 'true' }, sp); sp.appendChild(document.createTextNode(it.name)); }
+}
+function table(host, cols, rows) {
+  host.replaceChildren();
+  const t = h('table', null, host), tr = h('tr', null, h('thead', null, t));
+  for (const c of cols) h('th', { scope: 'col' }, tr, c);
+  const tb = h('tbody', null, t);
+  for (const r of rows) { const row = h('tr', null, tb); r.forEach((v, i) => h(i ? 'td' : 'th', i ? null : { scope: 'row' }, row, v)); }
+}
+
+// ---- generic line chart
+function lineChart(host, w, o) {
+  host.replaceChildren();
+  const H = o.height || 250;
+  const m = { l: o.ml ?? (o.y.label ? 60 : 44), r: o.mr ?? 14, t: o.mt ?? 14, b: o.x.strip ? 50 : 40 };
+  const pw = Math.max(40, w - m.l - m.r), ph = H - m.t - m.b;
+  const svg = s('svg', { width: w, height: H, viewBox: `0 0 ${w} ${H}`, role: 'img', 'aria-label': o.aria || '' }, host);
+  const tip = tooltip(host);
+  const xs = o.x.log ? logsc(o.x.domain[0], o.x.domain[1], m.l, m.l + pw) : lin(o.x.domain[0], o.x.domain[1], m.l, m.l + pw);
+  const ys = o.y.log ? logsc(o.y.domain[0], o.y.domain[1], m.t + ph, m.t) : lin(o.y.domain[0], o.y.domain[1], m.t + ph, m.t);
+  const gGrid = s('g', null, svg);
+  for (const t of o.y.ticks) {
+    s('line', { class: 'grid', x1: m.l, x2: m.l + pw, y1: ys(t), y2: ys(t) }, gGrid);
+    s('text', { class: 'tick', x: m.l - 8, y: ys(t) + 4, 'text-anchor': 'end' }, gGrid, o.y.fmt ? o.y.fmt(t) : t);
+  }
+  s('line', { class: 'base', x1: m.l, x2: m.l + pw, y1: m.t + ph, y2: m.t + ph }, svg);
+  const xt = o.x.ticks.filter(t => t >= o.x.domain[0] && t <= o.x.domain[1]);
+  const stripH = o.x.strip ? 7 : 0;
+  for (const t of xt) s('text', { class: 'tick', x: xs(t), y: m.t + ph + stripH + 17, 'text-anchor': 'middle' }, svg, o.x.fmt ? o.x.fmt(t) : t);
+  if (o.x.strip) {
+    const g = s('g', { 'aria-hidden': 'true' }, svg);
+    for (let nm = o.x.domain[0]; nm < o.x.domain[1]; nm += 2) s('rect', { x: xs(nm), y: m.t + ph + 3, width: Math.max(0.5, xs(nm + 2) - xs(nm) + 0.4), height: 5, fill: wlColor(nm) }, g);
+  }
+  if (o.x.label) s('text', { class: 'ttl', x: m.l + pw / 2, y: H - 4, 'text-anchor': 'middle' }, svg, o.x.label);
+  if (o.y.label) s('text', { class: 'ttl', x: 11, y: m.t + ph / 2, transform: `rotate(-90 11 ${m.t + ph / 2})`, 'text-anchor': 'middle' }, svg, o.y.label);
+  for (const mk of (o.vmarks || [])) {
+    if (mk.x < o.x.domain[0] || mk.x > o.x.domain[1]) continue;
+    if (mk.kind === 'tick') s('rect', { x: xs(mk.x) - 1, y: m.t - 2, width: 2, height: 8, class: 'f-' + mk.cls, rx: 1 }, svg);
+    else {
+      s('line', { class: 'mark-line', x1: xs(mk.x), x2: xs(mk.x), y1: m.t, y2: m.t + ph }, svg);
+      if (mk.text) { const right = xs(mk.x) > m.l + pw * 0.7; s('text', { class: 'lbl', x: xs(mk.x) + (right ? -5 : 5), y: m.t + 11 + (mk.dy || 0), 'text-anchor': right ? 'end' : 'start' }, svg, mk.text); }
+    }
+  }
+  for (const hm of (o.hmarks || [])) {
+    s('line', { class: 'mark-line', x1: m.l, x2: m.l + pw, y1: ys(hm.y), y2: ys(hm.y) }, svg);
+    if (hm.text) s('text', { class: 'lbl', x: hm.right ? m.l + pw - 6 : m.l + 6, y: ys(hm.y) - 5, 'text-anchor': hm.right ? 'end' : 'start' }, svg, hm.text);
+  }
+  const gData = s('g', null, svg);
+  for (const se of o.series) if (se.band) s('path', { class: 'band f-' + se.cls, d: areaPath(xs, ys, se.x, se.band.lo, se.band.hi) }, gData);
+  for (const se of o.series) if (se.faint) s('path', { class: 'ln-faint s-' + se.cls, d: linePath(xs, ys, se.x, se.faint) }, gData);
+  for (const se of o.series) if (se.y) s('path', { class: (se.ctx ? 'ln-ctx' : 'ln') + ' s-' + se.cls, d: linePath(xs, ys, se.x, se.y), style: se.width ? `stroke-width:${se.width}px` : null }, gData);
+  // direct labels at line ends: right-edge labels are stacked apart (with leaders), others sit above their end point
+  const ends = [];
+  for (const se of o.series) {
+    if (!se.end) continue;
+    let i = se.y.length - 1; while (i > 0 && !(se.y[i] != null && isFinite(se.y[i]))) i--;
+    ends.push({ se, x: xs(se.x[i]), y: ys(se.y[i]) });
+  }
+  const edge = ends.filter(e => e.x > m.l + pw - 4).sort((a, b) => a.y - b.y);
+  edge.forEach((e, k) => { e.ly = k ? Math.max(e.y, edge[k - 1].ly + 14) : e.y; });
+  const over = edge.length ? edge[edge.length - 1].ly - (m.t + ph) : 0;
+  if (over > 0) edge.forEach(e => { e.ly -= over; });
+  edge.forEach((e, k) => { if (k && e.ly < edge[k - 1].ly + 14) e.ly = edge[k - 1].ly + 14; });
+  for (const e of ends) {
+    if (e.ly == null) { s('text', { class: 'lbl', x: e.x + 4, y: e.y - 8 }, svg, e.se.end); continue; }
+    if (Math.abs(e.ly - e.y) > 2) s('line', { class: 's-' + e.se.cls, x1: e.x + 2, y1: e.y, x2: e.x + 7, y2: e.ly, 'stroke-width': 1 }, svg);
+    s('text', { class: 'lbl', x: e.x + 9, y: e.ly + 4 }, svg, e.se.end);
+  }
+  // hover layer: crosshair snaps to the nearest x, one tooltip lists every series there
+  const cross = s('line', { class: 'cross', y1: m.t, y2: m.t + ph, visibility: 'hidden' }, svg);
+  const dots = o.series.filter(se => se.y && !se.ctx).map(se => s('circle', { r: 4, class: 'ring f-' + se.cls, visibility: 'hidden' }, svg));
+  const hit = s('rect', { class: 'hit', x: m.l, y: m.t, width: pw, height: ph, tabindex: 0, 'aria-label': (o.aria || 'chart') + ': use arrow keys to read values' }, svg);
+  const snap = o.snap || o.series[0].x;
+  let cur = -1;
+  function show(k) {
+    cur = Math.max(0, Math.min(snap.length - 1, k));
+    const xv = snap[cur], px = xs(xv);
+    cross.setAttribute('x1', px); cross.setAttribute('x2', px); cross.setAttribute('visibility', 'visible');
+    const rows = [];
+    let di = 0, topY = m.t + ph;
+    for (const se of o.series) {
+      if (!se.y || se.ctx) continue;
+      const dot = dots[di++];
+      const j = nearestIdx(se.x, xv);
+      const val = (se.tipY || se.y)[j];
+      if (Math.abs(se.x[j] - xv) > (o.snapTol ?? Infinity) || val == null || !isFinite(val)) { dot.setAttribute('visibility', 'hidden'); continue; }
+      dot.setAttribute('cx', xs(se.x[j])); dot.setAttribute('cy', ys(se.y[j])); dot.setAttribute('visibility', 'visible');
+      topY = Math.min(topY, ys(se.y[j]));
+      rows.push({ cls: se.cls, val: o.tipFmt ? o.tipFmt(val) : fx(val, 3), name: se.tipName || se.name, v: val });
+    }
+    if (o.tipSort) rows.sort((a, b) => b.v - a.v);
+    fillTip(tip, o.tipHead ? o.tipHead(xv) : String(xv), rows);
+    placeTip(tip, host, px, topY);
+  }
+  function hide() { cross.setAttribute('visibility', 'hidden'); dots.forEach(d => d.setAttribute('visibility', 'hidden')); tip.hidden = true; }
+  hit.addEventListener('pointermove', e => { const r = svg.getBoundingClientRect(); show(nearestIdx(snap, xs.inv(e.clientX - r.left))); });
+  hit.addEventListener('pointerleave', hide);
+  hit.addEventListener('blur', hide);
+  hit.addEventListener('focus', () => show(cur < 0 ? Math.floor(snap.length / 2) : cur));
+  hit.addEventListener('keydown', e => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { e.preventDefault(); const step = e.shiftKey ? 10 : 1; show(cur + (e.key === 'ArrowRight' ? step : -step)); }
+    if (e.key === 'Escape') hide();
+  });
+}
+
+// ================================================================ Figure 1: image panels
+const frames = D.frames, byName = Object.fromEntries(frames.map(f => [f.name, f]));
+const state = { frame: frames.find(f => f.name === '91') ? '91' : frames[0].name };
+const PANELS = [
+  { key: 'rgbcrop', title: 'Colour composite', sub: () => '640 / 550 / 460 nm', c: null },
+  { key: 'band', title: 'Best single band', sub: f => fx(f.best_band_nm, 0) + ' nm', c: 'band', cls: 'raw' },
+  { key: 'volt', title: 'Best single response', sub: f => fx(f.best_volt, 2) + ' V', c: 'volt', cls: 'a' },
+  { key: 'lda_raw', title: 'Best mix of 133 raw bands', sub: () => 'linear discriminant', c: 'lda_raw', cls: 'raw' },
+  { key: 'lda_resp', title: 'Best mix of 344 responses', sub: () => 'linear discriminant', c: 'lda_resp', cls: 'a' },
+  { key: 'lda_pca', title: 'Best mix of 11 principal directions', sub: () => 'linear discriminant', c: 'lda_pca', cls: 'pca' },
+  { key: 'lda_top10', title: 'Best mix of the learned top-10', sub: () => 'linear discriminant', c: 'lda_top10', cls: 'b' },
+];
+const seg = document.getElementById('frame-seg');
+for (const f of frames) {
+  const b = h('button', { type: 'button', 'aria-pressed': String(f.name === state.frame), title: `${f.obj_px.toLocaleString()} object pixels` }, seg, f.name);
+  b.addEventListener('click', () => setFrame(f.name));
+}
+const panelsEl = document.getElementById('panels');
+const panelRefs = PANELS.map((p, idx) => {
+  if (idx === 3) { const n = h('div', { class: 'ip-note' }, panelsEl); n.append(h('b', null, null, 'Top row: '), 'single channels. ', h('b', null, null, 'Bottom row: '), 'the best linear mix of each input. The bar under each panel shows its contrast relative to the best mix of the 133 raw bands.'); }
+  const wrap = h('div', { class: 'ip' }, panelsEl);
+  const box = h('div', { class: 'ip-img' }, wrap);
+  const img = h('img', { alt: '', loading: 'eager', decoding: 'async' }, box);
+  const ol = h('img', { class: 'ol', alt: '', 'aria-hidden': 'true' }, box);
+  const t = h('h3', null, wrap, p.title);
+  const sub = h('div', { class: 'ip-sub' }, wrap);
+  const val = h('div', { class: 'ip-val' }, wrap);
+  const meter = h('div', { class: 'meter', 'aria-hidden': 'true' }, wrap);
+  const bar = h('span', { class: p.cls ? 'bg-' + p.cls : '' }, meter);
+  if (!p.c) { val.style.visibility = 'hidden'; meter.style.visibility = 'hidden'; }
+  return { p, img, ol, sub, val, bar, t };
+});
+document.getElementById('outline-toggle').addEventListener('change', e => panelsEl.classList.toggle('no-outline', !e.target.checked));
+function renderPanels() {
+  const f = byName[state.frame];
+  const ref = f.contrast.lda_raw;
+  for (const r of panelRefs) {
+    r.img.src = D.img[`val${f.name}_${r.p.key}`];
+    r.img.alt = `${r.p.title}, validation frame ${f.name}`;
+    r.ol.src = D.img[`val${f.name}_outline`];
+    r.sub.textContent = r.p.sub(f);
+    if (r.p.c) {
+      const c = f.contrast[r.p.c];
+      r.val.replaceChildren(document.createTextNode('contrast '), h('b', null, null, fx(c, 2)));
+      r.bar.style.width = Math.min(100, 100 * c / ref).toFixed(1) + '%';
+    }
+  }
+}
+function setFrame(name) {
+  state.frame = name;
+  for (const b of seg.children) b.setAttribute('aria-pressed', String(b.textContent === name));
+  renderPanels();
+  redraw(document.getElementById('c-fisher-raw')); redraw(document.getElementById('c-fisher-resp')); redraw(document.getElementById('c-recon'));
+  document.getElementById('fig5-frame').textContent = name;
+}
+renderPanels();
+document.getElementById('fig5-frame').textContent = state.frame;
+
+// ================================================================ Figure 2: per-channel Fisher ratio
+legend(document.getElementById('fig2-legend'), [
+  { name: 'Raw band, selected frame', cls: 'raw' }, { name: 'EC response, selected frame', cls: 'a' },
+  { name: 'Middle half of 12 frames', cls: 'muted', kind: 'area' }]);
+function fisherMax() { const f = byName[state.frame]; return Math.max(...f.fisher_raw, ...f.fisher_resp, ...D.fisherRawQ.q75, ...D.fisherRespQ.q75); }
+function fisherY() { const top = fisherMax() * 1.08, t = niceTicks(0, top, 4); return { domain: [0, top], ticks: t, fmt: stepFmt(t), label: 'Fisher ratio' }; }
+mount(document.getElementById('c-fisher-raw'), (host, w) => {
+  const f = byName[state.frame];
+  lineChart(host, w, {
+    height: 240, aria: 'Fisher ratio per raw band', x: { domain: [400, 800], ticks: [400, 500, 600, 700, 800], label: 'wavelength (nm)', strip: true },
+    y: fisherY(), snap: D.wl, tipHead: v => fx(v, 1) + ' nm', tipFmt: v => fx(v, 2),
+    series: [
+      { x: D.wl, cls: 'muted', name: 'median of 12 frames', band: { lo: D.fisherRawQ.q25, hi: D.fisherRawQ.q75 }, y: D.fisherRawQ.med, ctx: true },
+      { x: D.wl, y: f.fisher_raw, cls: 'raw', name: `frame ${f.name}` }],
+    vmarks: [{ x: f.best_band_nm, text: `best ${fx(f.best_band_nm, 0)} nm` }],
+  });
+});
+mount(document.getElementById('c-fisher-resp'), (host, w) => {
+  const f = byName[state.frame];
+  lineChart(host, w, {
+    height: 240, aria: 'Fisher ratio per EC response', x: { domain: [-1, 2.5], ticks: [-1, -0.5, 0, 0.5, 1, 1.5, 2, 2.5], fmt: v => fx(v, 1), label: 'bias voltage (V)' },
+    y: fisherY(), snap: D.volts, tipHead: v => fx(v, 2) + ' V', tipFmt: v => fx(v, 2),
+    series: [
+      { x: D.volts, cls: 'muted', name: 'median of 12 frames', band: { lo: D.fisherRespQ.q25, hi: D.fisherRespQ.q75 }, y: D.fisherRespQ.med, ctx: true },
+      { x: D.volts, y: f.fisher_resp, cls: 'a', name: `frame ${f.name}` }],
+    vmarks: [...D.topVolts.map(v => ({ x: v, kind: 'tick', cls: 'b' })), { x: f.best_volt, text: `best ${fx(f.best_volt, 2)} V`, dy: 8 }],
+  });
+});
+table(document.getElementById('t-fisher'), ['Frame', 'Object px', 'Best band (nm)', 'Fisher', 'Best response (V)', 'Fisher'],
+  frames.map(f => [f.name, f.obj_px.toLocaleString(), fx(f.best_band_nm, 0), fx(f.best_band_fisher, 2), fx(f.best_volt, 2), fx(f.best_volt_fisher, 2)]));
+
+// ================================================================ Figure 3: responsivity heatmap + top-10 curves
+const VGRID = []; for (let k = 0; k <= 350; k++) VGRID.push(+(-1 + k * 0.01).toFixed(2));
+mount(document.getElementById('c-heat'), (host, w) => {
+  host.replaceChildren();
+  const H = 300, m = { l: 60, r: 10, t: 22, b: 40 }, pw = w - m.l - m.r, ph = H - m.t - m.b;
+  const svg = s('svg', { width: w, height: H, viewBox: `0 0 ${w} ${H}`, role: 'img', 'aria-label': 'Responsivity heatmap, voltage by wavelength' }, host);
+  const tip = tooltip(host);
+  const xs = lin(-1.005, 2.505, m.l, m.l + pw), ys = lin(D.wl[0] - 1.5, D.wl[D.wl.length - 1] + 1.5, m.t + ph, m.t);
+  for (const [cls, src] of [['heat-l', D.heat.light], ['heat-d', D.heat.dark]]) s('image', { class: cls, href: src, x: m.l, y: m.t, width: pw, height: ph, preserveAspectRatio: 'none' }, svg);
+  for (const t of [400, 500, 600, 700, 800]) s('text', { class: 'tick', x: m.l - 8, y: ys(t) + 4, 'text-anchor': 'end' }, svg, t);
+  for (const t of [-1, 0, 1, 2]) s('text', { class: 'tick', x: xs(t), y: m.t + ph + 16, 'text-anchor': 'middle' }, svg, fx(t, 1));
+  s('text', { class: 'ttl', x: m.l + pw / 2, y: H - 4, 'text-anchor': 'middle' }, svg, 'bias voltage (V)');
+  s('text', { class: 'ttl', x: 11, y: m.t + ph / 2, transform: `rotate(-90 11 ${m.t + ph / 2})`, 'text-anchor': 'middle' }, svg, 'wavelength (nm)');
+  for (const v of D.topVolts) s('path', { d: `M${xs(v) - 4},${m.t - 12} h8 l-4,7 z`, class: 'f-b' }, svg);
+  s('path', { d: `M${xs(1.74) - 4},${m.t - 12} h8 l-4,7 z`, class: 'f-ink' }, svg);
+  s('text', { class: 'lbl', x: xs(1.74) + 7, y: m.t - 6 }, svg, '1.74 V');
+  const cross = s('path', { class: 'cross', fill: 'none', visibility: 'hidden' }, svg);
+  const hit = s('rect', { class: 'hit', x: m.l, y: m.t, width: pw, height: ph, tabindex: 0, 'aria-label': 'Responsivity heatmap: hover to read values' }, svg);
+  let cx = Math.round(D.volts.length / 2), cy = Math.round(D.wl.length / 2);
+  function show(i, j) {
+    cx = Math.max(0, Math.min(D.volts.length - 1, i)); cy = Math.max(0, Math.min(D.wl.length - 1, j));
+    const px = xs(D.volts[cx]), py = ys(D.wl[cy]);
+    cross.setAttribute('d', `M${px},${m.t}V${m.t + ph}M${m.l},${py}H${m.l + pw}`); cross.setAttribute('visibility', 'visible');
+    const val = D.Rpk[cy][cx];
+    fillTip(tip, `${fx(D.volts[cx], 2)} V · ${fx(D.wl[cy], 1)} nm`, [{ val: fx(val, 2), name: 'peak-normalised responsivity' }]);
+    placeTip(tip, host, px, py);
+  }
+  function hide() { cross.setAttribute('visibility', 'hidden'); tip.hidden = true; }
+  hit.addEventListener('pointermove', e => { const r = svg.getBoundingClientRect(); show(nearestIdx(D.volts, xs.inv(e.clientX - r.left)), nearestIdx(D.wl, ys.inv(e.clientY - r.top))); });
+  hit.addEventListener('pointerleave', hide); hit.addEventListener('blur', hide);
+  hit.addEventListener('focus', () => show(cx, cy));
+  hit.addEventListener('keydown', e => {
+    const k = { ArrowRight: [1, 0], ArrowLeft: [-1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] }[e.key];
+    if (k) { e.preventDefault(); const st = e.shiftKey ? 10 : 1; show(cx + k[0] * st, cy + k[1] * st); }
+  });
+});
+legend(document.getElementById('fig3-legend'), [{ name: 'Top-10 voltages', cls: 'b' }, { name: '1.74 V', cls: 'ink' }, { name: 'Every 24th voltage', cls: 'g1' }]);
+mount(document.getElementById('c-top10'), (host, w) => {
+  const col = j => D.Rpk.map(row => row[j]);
+  const ctx = []; for (let j = 0; j < D.volts.length; j += 24) ctx.push({ x: D.wl, y: col(j), cls: 'g1', name: fx(D.volts[j], 2) + ' V', ctx: true });
+  const top = D.topIdx.map(j => ({ x: D.wl, y: col(j), cls: 'b', name: fx(D.volts[j], 2) + ' V', width: 1.6 }));
+  const best = { x: D.wl, y: col(D.bestVoltIdx), cls: 'ink', name: fx(D.volts[D.bestVoltIdx], 2) + ' V (most discriminative)', width: 2, end: '1.74 V' };
+  lineChart(host, w, {
+    height: 300, mr: 46, aria: 'Responsivity curves of the top-10 voltages', x: { domain: [400, 800], ticks: [400, 500, 600, 700, 800], label: 'wavelength (nm)', strip: true },
+    y: { domain: [-1.05, 1.05], ticks: [-1, -0.5, 0, 0.5, 1], fmt: v => fx(v, 1), label: 'responsivity (peak = 1)' },
+    snap: D.wl, tipHead: v => fx(v, 1) + ' nm', tipFmt: v => fx(v, 2), tipSort: true,
+    series: [...ctx, ...top, best],
+  });
+});
+
+// ================================================================ Figure 4: residual energy
+legend(document.getElementById('fig4-legend'), [{ name: 'EC responsivity matrix (133 × 344)', cls: 'a' }, { name: 'Scene spectra (training-set band covariance)', cls: 'raw' }]);
+mount(document.getElementById('c-rank'), (host, w) => {
+  const K = D.residR.map((_, i) => i + 1);
+  const clamp = a => a.map(v => v >= 1e-7 ? v : null);
+  lineChart(host, w, {
+    height: 280, mr: 20, ml: 70, aria: 'Residual energy against number of principal directions',
+    x: { domain: [1, 100], ticks: [1, 20, 40, 60, 80, 100], label: 'principal directions kept (k)' },
+    y: { domain: [1e-7, 1], log: true, ticks: [1, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7], fmt: v => '10' + String(Math.round(Math.log10(v))).replace('-', '⁻').replace(/[0-9]/g, d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[d]), label: 'fraction of energy left out' },
+    snap: K, tipHead: v => `k = ${v}`, tipFmt: v => v < 1e-4 ? v.toExponential(1) : pctf(v),
+    hmarks: [{ y: 1e-2, text: '99 % kept', right: true }, { y: 1e-3, text: '99.9 % kept', right: true }],
+    vmarks: [{ x: D.rank999, text: `filter: ${D.rank999}` }, { x: D.scene999, text: `scenes: ${D.scene999}` }],
+    series: [
+      { x: K, y: clamp(D.residR), cls: 'a', name: 'EC responsivity matrix' },
+      { x: K, y: clamp(D.residScene), cls: 'raw', name: 'scene spectra' }],
+  });
+});
+table(document.getElementById('t-rank'), ['k', 'Filter: energy left', 'Scenes: energy left'],
+  D.residR.slice(0, 100).map((v, i) => [String(i + 1), v.toExponential(2), D.residScene[i].toExponential(2)]));
+
+// ================================================================ Figure 5: difference spectrum vs what the filter can represent
+legend(document.getElementById('fig5-legend'), [{ name: 'Object − surround (raw bands)', cls: 'raw' }, { name: 'Best fit from 11 filter directions', cls: 'a' }]);
+mount(document.getElementById('c-recon'), (host, w) => {
+  const r = D.recon[state.frame];
+  const all = [...r.diff, ...r.k11]; let lo = Math.min(...all), hi = Math.max(...all); const pad = (hi - lo) * 0.08; lo -= pad; hi += pad;
+  const e = r.diff.reduce((a, v) => a + v * v, 0), e11 = r.k11.reduce((a, v) => a + v * v, 0);
+  const res = r.diff.reduce((a, v, i) => a + (v - r.k11[i]) ** 2, 0);
+  document.getElementById('fig5-cap').textContent = `Values are in the model's input units (each frame divided by its 99th-percentile intensity). For frame ${state.frame}, the 11-direction fit reproduces ${pctf(1 - res / e)} of the difference's energy; what it misses is narrow spectral structure. Sharp features near 760 nm coincide with the atmospheric oxygen absorption band (O₂-A), so part of that narrow structure may come from illumination rather than the object's material.`;
+  lineChart(host, w, {
+    height: 250, aria: 'Object minus surround spectrum and its 11-direction fit',
+    x: { domain: [400, 800], ticks: [400, 500, 600, 700, 800], label: 'wavelength (nm)', strip: true },
+    y: { domain: [lo, hi], ticks: niceTicks(lo, hi, 4), fmt: stepFmt(niceTicks(lo, hi, 4)), label: 'object − surround' },
+    snap: D.wl, tipHead: v => fx(v, 1) + ' nm', tipFmt: v => fx(v, 3),
+    hmarks: lo < 0 && hi > 0 ? [{ y: 0 }] : [],
+    series: [{ x: D.wl, y: r.diff, cls: 'raw', name: 'object − surround' }, { x: D.wl, y: r.k11, cls: 'a', name: '11-direction fit' }],
+  });
+});
+
+// ================================================================ Figure 6: slope chart of kept separability
+const CATS = [['raw133', '133 raw bands'], ['resp344', '344 EC responses'], ['pca11', '11 principal directions'], ['top10', 'Learned top-10']];
+const pctKept = f => CATS.map(([k]) => 100 * f.sep_ring[k] / f.sep_ring.raw133);
+const median = a => { const b = [...a].sort((x, y) => x - y), n = b.length; return n % 2 ? b[(n - 1) / 2] : (b[n / 2 - 1] + b[n / 2]) / 2; };
+const medKept = CATS.map((_, i) => median(frames.map(f => pctKept(f)[i])));
+mount(document.getElementById('c-slope'), (host, w) => {
+  host.replaceChildren();
+  const H = 300, m = { l: 66, r: 26, t: 16, b: 52 }, pw = w - m.l - m.r, ph = H - m.t - m.b;
+  const svg = s('svg', { width: w, height: H, viewBox: `0 0 ${w} ${H}`, role: 'img', 'aria-label': 'Separability kept by each input, per frame' }, host);
+  const tip = tooltip(host);
+  const xs = i => m.l + pw * (0.08 + 0.84 * i / (CATS.length - 1));
+  const ys = lin(20, 106, m.t + ph, m.t);
+  for (const t of [20, 40, 60, 80, 100]) { s('line', { class: 'grid', x1: m.l, x2: m.l + pw, y1: ys(t), y2: ys(t) }, svg); s('text', { class: 'tick', x: m.l - 8, y: ys(t) + 4, 'text-anchor': 'end' }, svg, t + ' %'); }
+  s('text', { class: 'ttl', x: 11, y: m.t + ph / 2, transform: `rotate(-90 11 ${m.t + ph / 2})`, 'text-anchor': 'middle' }, svg, 'separability kept');
+  CATS.forEach(([, name], i) => {
+    const words = name.split(' '), half = Math.ceil(words.length / 2);
+    const lines = w < 520 ? [words.slice(0, half).join(' '), words.slice(half).join(' ')] : [name];
+    lines.forEach((ln, k) => s('text', { class: 'ttl', x: xs(i), y: m.t + ph + 20 + k * 14, 'text-anchor': 'middle' }, svg, ln));
+  });
+  const gLines = s('g', null, svg), lineEls = [];
+  for (const f of frames) {
+    const v = pctKept(f);
+    const d = v.map((p, i) => (i ? 'L' : 'M') + xs(i).toFixed(1) + ',' + ys(p).toFixed(1)).join('');
+    const pth = s('path', { d, class: 'ln-ctx s-g2', style: 'stroke-width:1.25px' }, gLines);
+    v.forEach((p, i) => s('circle', { cx: xs(i), cy: ys(p), r: 2.5, class: 'f-g2' }, gLines));
+    lineEls.push({ f, v, pth });
+  }
+  const dm = medKept.map((p, i) => (i ? 'L' : 'M') + xs(i).toFixed(1) + ',' + ys(p).toFixed(1)).join('');
+  s('path', { d: dm, class: 'ln s-ink', style: 'stroke-width:2.5px' }, svg);
+  medKept.forEach((p, i) => {
+    s('circle', { cx: xs(i), cy: ys(p), r: 5, class: 'ring f-ink' }, svg);
+    s('text', { class: 'lbl lbl-strong', x: xs(i) + (i === CATS.length - 1 ? -9 : 9), y: ys(p) - 9, 'text-anchor': i === CATS.length - 1 ? 'end' : 'start' }, svg, `median ${Math.round(p)} %`);
+  });
+  const hl = s('path', { class: 'ln s-ink', visibility: 'hidden', style: 'stroke-width:1.5px', opacity: 0.8 }, svg);
+  const hit = s('rect', { class: 'hit', x: m.l, y: m.t, width: pw, height: ph, tabindex: 0, 'aria-label': 'Per-frame separability: arrow keys step through frames' }, svg);
+  let cur = -1;
+  function show(k, px) {
+    cur = (k + frames.length) % frames.length;
+    const L = lineEls[cur];
+    hl.setAttribute('d', L.pth.getAttribute('d')); hl.setAttribute('visibility', 'visible');
+    fillTip(tip, `Validation frame ${L.f.name}`, CATS.map(([, name], i) => ({ val: Math.round(L.v[i]) + ' %', name })));
+    placeTip(tip, host, px ?? xs(1), Math.min(...L.v.map(ys)));
+  }
+  function hide() { hl.setAttribute('visibility', 'hidden'); tip.hidden = true; }
+  hit.addEventListener('pointermove', e => {
+    const r = svg.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
+    let ci = 0, bd = Infinity; for (let i = 0; i < CATS.length; i++) { const d = Math.abs(xs(i) - px); if (d < bd) { bd = d; ci = i; } }
+    let best = 0, bdy = Infinity; lineEls.forEach((L, k) => { const d = Math.abs(ys(L.v[ci]) - py); if (d < bdy) { bdy = d; best = k; } });
+    show(best, px);
+  });
+  hit.addEventListener('pointerleave', hide); hit.addEventListener('blur', hide);
+  hit.addEventListener('focus', () => show(cur < 0 ? 0 : cur));
+  hit.addEventListener('keydown', e => { if (e.key === 'ArrowDown' || e.key === 'ArrowRight') { e.preventDefault(); show(cur + 1); } if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') { e.preventDefault(); show(cur - 1); } if (e.key === 'Escape') hide(); });
+});
+table(document.getElementById('t-slope'), ['Frame', 'Raw 133 (distance)', '344 responses', '11 principal dir.', 'Top-10', 'vs whole background: 344 / 11 / top-10'],
+  frames.map(f => { const v = pctKept(f); const b = CATS.map(([k]) => 100 * f.sep_bg[k] / f.sep_bg.raw133);
+    return [f.name, fx(f.sep_ring.raw133, 2), Math.round(v[1]) + ' %', Math.round(v[2]) + ' %', Math.round(v[3]) + ' %', `${Math.round(b[1])} / ${Math.round(b[2])} / ${Math.round(b[3])} %`]; }));
+
+// ================================================================ Figure 7: training curves
+const RUNS = ['raw', 'A', 'B', 'pca'];
+legend(document.getElementById('fig7-legend'), RUNS.map(k => ({ name: SER[k].name, cls: SER[k].cls })));
+const SHORT = { raw: 'Raw', A: '344', B: 'Top-10', pca: 'PCA-11' };
+function trainChart(id, key, label) {
+  mount(document.getElementById(id), (host, w) => lineChart(host, w, {
+    height: 230, mr: 50, ml: 40, aria: label + ' per epoch',
+    x: { domain: [0, 100], ticks: [0, 25, 50, 75, 100], label: 'epoch' },
+    y: { domain: [0, 1], ticks: [0, 0.25, 0.5, 0.75, 1], fmt: v => fx(v, v === 0 || v === 1 ? 0 : 2) },
+    snap: D.runs.raw.epoch, snapTol: 0.5, tipHead: v => 'epoch ' + v, tipFmt: v => fx(v, 3),
+    series: RUNS.map(k => ({ x: D.runs[k].epoch, y: D.runs[k][key + '_s'], faint: D.runs[k][key], tipY: D.runs[k][key], cls: SER[k].cls, name: SER[k].name, end: SHORT[k] })),
+  }));
+}
+trainChart('c-tr-ap', 'ap50', 'AP50');
+trainChart('c-tr-rec', 'recall50', 'Recall at IoU 0.5');
+trainChart('c-tr-roi', 'coverage_recall99_roi_op', 'Objects inside an exported ROI');
+{
+  const rows = [];
+  for (let e = 0; e < 100; e++) {
+    const r = [String(e)];
+    for (const k of RUNS) { const i = D.runs[k].epoch.indexOf(e); r.push(i < 0 ? '–' : `${fx(D.runs[k].ap50[i], 3)} / ${fx(D.runs[k].recall50[i], 3)} / ${fx(D.runs[k].coverage_recall99_roi_op[i], 3)}`); }
+    rows.push(r);
+  }
+  table(document.getElementById('t-train'), ['Epoch', ...RUNS.map(k => SER[k].name + ': AP50 / recall / ROI')], rows);
+}
+document.getElementById('pca-epochs').textContent = D.runs.pca.epoch.length;
+
+// ================================================================ Figure 8: gate weights
+const GATE_EP = [['9', 'g1'], ['29', 'g2'], ['59', 'g3'], ['99', 'a']];
+legend(document.getElementById('fig8-legend'), [...GATE_EP.map(([e, c]) => ({ name: 'epoch ' + e, cls: c })), { name: 'Top-10 voltages', cls: 'b' }]);
+mount(document.getElementById('c-gate'), (host, w) => {
+  const mx = Math.max(...D.gate['99']);
+  lineChart(host, w, {
+    height: 260, mr: 16, aria: 'Gate weight per voltage at four epochs',
+    x: { domain: [-1, 2.5], ticks: [-1, -0.5, 0, 0.5, 1, 1.5, 2, 2.5], fmt: v => fx(v, 1), label: 'bias voltage (V)' },
+    y: { domain: [0, Math.ceil(mx + 0.5)], ticks: niceTicks(0, Math.ceil(mx + 0.5), 4), label: 'gate weight' },
+    snap: D.volts, tipHead: v => fx(v, 2) + ' V', tipFmt: v => fx(v, 2),
+    vmarks: [...D.topVolts.map(v => ({ x: v, kind: 'tick', cls: 'b' })), { x: 1.74, text: '1.74 V' }],
+    hmarks: [{ y: 1, text: 'uniform' }],
+    series: GATE_EP.map(([e, c]) => ({ x: D.volts, y: D.gate[e], cls: c, name: 'epoch ' + e, width: e === '99' ? 2 : 1.5 })),
+  });
+});
+
+// ================================================================ Figure 9: test metrics
+const MODELS = [['raw', 'raw'], ['A', 'a'], ['B', 'b']];
+legend(document.getElementById('fig9-legend'), MODELS.map(([k, c]) => ({ name: SER[k].name, cls: c, kind: 'sq' })));
+const METRICS = [['recall50', 'Recall at IoU 0.5, all boxes'], ['ap50', 'AP50, all boxes'], ['matched_iou', 'IoU of matched boxes'],
+  ['coverage_recall99_roi_op', 'Objects fully inside an exported ROI'], ['recall50_op', 'Recall at IoU 0.5, exported boxes']];
+mount(document.getElementById('c-bars'), (host, w) => {
+  host.replaceChildren();
+  const narrow = w < 560, labW = narrow ? 0 : Math.min(250, w * 0.34);
+  const bh = 12, gap = 2, groupH = MODELS.length * (bh + gap) + (narrow ? 34 : 16);
+  const m = { l: labW + 8, r: 44, t: 8, b: 26 }, H = m.t + METRICS.length * groupH + m.b, pw = w - m.l - m.r;
+  const svg = s('svg', { width: w, height: H, viewBox: `0 0 ${w} ${H}`, role: 'img', 'aria-label': 'Test metrics per model' }, host);
+  const tip = tooltip(host);
+  const xs = lin(0, 1, m.l, m.l + pw);
+  for (const t of [0, 0.25, 0.5, 0.75, 1]) { s('line', { class: 'grid', x1: xs(t), x2: xs(t), y1: m.t, y2: H - m.b }, svg); s('text', { class: 'tick', x: xs(t), y: H - 8, 'text-anchor': 'middle' }, svg, fx(t, t % 1 ? 2 : 0)); }
+  METRICS.forEach(([key, name], gi) => {
+    const y0 = m.t + gi * groupH + (narrow ? 20 : 0);
+    if (narrow) s('text', { class: 'lbl', x: m.l, y: y0 - 6 }, svg, name);
+    else s('text', { class: 'lbl', x: labW, y: y0 + (MODELS.length * (bh + gap)) / 2 + 3, 'text-anchor': 'end' }, svg, name);
+    MODELS.forEach(([mk, cls], mi) => {
+      const v = D.test[mk].test[key], y = y0 + mi * (bh + gap), x1 = xs(v), x0 = xs(0), r = Math.min(4, (x1 - x0) / 2);
+      const d = `M${x0},${y}H${x1 - r}Q${x1},${y} ${x1},${y + r}V${y + bh - r}Q${x1},${y + bh} ${x1 - r},${y + bh}H${x0}Z`;
+      const bar = s('path', { d, class: 'f-' + cls, tabindex: 0, 'aria-label': `${SER[mk].name}, ${name}: ${fx(v, 3)}` }, svg);
+      s('text', { class: 'tick', x: x1 + 5, y: y + bh - 2 }, svg, fx(v, 2));
+      const showTip = () => { fillTip(tip, name, [{ cls, val: fx(v, 3), name: SER[mk].name }]); placeTip(tip, host, x1, y); bar.setAttribute('opacity', '0.8'); };
+      const hideTip = () => { tip.hidden = true; bar.removeAttribute('opacity'); };
+      bar.addEventListener('pointerenter', showTip); bar.addEventListener('pointerleave', hideTip);
+      bar.addEventListener('focus', showTip); bar.addEventListener('blur', hideTip);
+    });
+  });
+});
+table(document.getElementById('t-test'), ['Metric', 'Raw 133 bands (ep 57)', '344 EC responses (ep 89)', 'Learned top-10 (ep 25)'], [
+  ...METRICS.map(([k, n]) => [n, ...MODELS.map(([mk]) => fx(D.test[mk].test[k], 3))]),
+  ['Objects inside an ROI, all boxes', ...MODELS.map(([mk]) => fx(D.test[mk].test.coverage_recall99_roi, 3))],
+  ['Exported boxes per frame', ...MODELS.map(([mk]) => fx(D.test[mk].test.dets_per_image_op, 2))],
+  ['Tightness of exported boxes', ...MODELS.map(([mk]) => fx(D.test[mk].test.tightness_op, 3))],
+  ['Validation recall at IoU 0.5', ...MODELS.map(([mk]) => fx(D.test[mk].val.recall50, 3))],
+  ['Validation AP50', ...MODELS.map(([mk]) => fx(D.test[mk].val.ap50, 3))],
+  ['Validation objects inside an exported ROI', ...MODELS.map(([mk]) => fx(D.test[mk].val.coverage_recall99_roi_op, 3))],
+]);
+
+// ================================================================ Figure 10: detection examples
+const ex = Object.fromEntries(D.examples.map(e => [e.name, e]));
+const detsEl = document.getElementById('dets');
+const togg = document.getElementById('det-toggles');
+h('span', { class: 'ctl-label' }, togg, 'Show boxes');
+for (const [mk, cls] of MODELS) {
+  const lab = h('label', { class: 'check' }, togg);
+  const cb = h('input', { type: 'checkbox', id: 'show-' + cls }, lab); cb.checked = true;
+  h('span', { class: 'k bg-' + cls, 'aria-hidden': 'true' }, lab);
+  lab.appendChild(document.createTextNode(SER[mk].name));
+  cb.addEventListener('change', () => detsEl.classList.toggle('hide-' + cls, !cb.checked));
+}
+const TITLES = { all: 'All three find it', raw: 'Only the raw model finds it', B: 'Only the top-10 model finds it', none: 'All three miss it' };
+for (const [name, kind] of D.showExamples) {
+  const e = ex[name]; if (!e) continue;
+  const card = h('div', { class: 'det' }, detsEl);
+  h('h3', null, card, TITLES[kind]);
+  h('div', { class: 'det-sub' }, card, `frame ${name} · ${e.obj_px.toLocaleString()} px`);
+  const box = h('div', { class: 'det-img', role: 'img', 'aria-label': `Test frame ${name} with ground truth outline and detections` }, card);
+  box.style.aspectRatio = `${e.W} / ${e.H}`;
+  box.style.backgroundImage = `url("${D.img['test' + name + '_rgb']}")`;
+  h('img', { src: D.img['test' + name + '_outline'], alt: '', 'aria-hidden': 'true' }, box);
+  const svg = s('svg', { viewBox: `0 0 ${e.W} ${e.H}`, preserveAspectRatio: 'none', 'aria-hidden': 'true' }, box);
+  for (const [mk, cls] of [...MODELS].reverse()) for (const b of e.models[mk].boxes) s('rect', { class: 'bx-' + cls + ' s-' + cls, x: b[0], y: b[1], width: b[2] - b[0], height: b[3] - b[1] }, svg);
+  const ul = h('ul', { class: 'outcome' }, card);
+  for (const [mk, cls] of MODELS) {
+    const r = e.models[mk], li = h('li', null, ul);
+    h('span', { class: 'k bg-' + cls, 'aria-hidden': 'true' }, li);
+    h('span', { class: 'res' }, li, r.hit50 ? '✓' : '✗');
+    li.appendChild(document.createTextNode(r.hit50 ? `${SHORT[mk]}: found, IoU ${fx(Math.max(...r.best_iou), 2)}` : `${SHORT[mk]}: missed` + (r.boxes.length ? `, ${r.boxes.length} box${r.boxes.length > 1 ? 'es' : ''} elsewhere` : ', no box')));
+  }
+}
+table(document.getElementById('t-examples'), ['Test frame (by object size)', 'Object px', 'Raw 133 bands', '344 EC responses', 'Learned top-10'],
+  D.examples.map(e => [e.name, e.obj_px.toLocaleString(), ...MODELS.map(([mk]) => { const r = e.models[mk]; const iou = Math.max(0, ...r.best_iou); return (r.hit50 ? '✓ ' : '✗ ') + 'IoU ' + fx(iou, 2) + (r.roi_cov ? ' · in ROI' : ''); })]));
+})();
+</script>
