@@ -61,6 +61,10 @@ def get_args_parser():
     parser.add_argument('--pretrained', default='auto', help="'auto' downloads <variant>.pt, a path, or 'none'")
     parser.add_argument('--gate-entropy-weight', type=float, default=None, help='overrides cfg')
     parser.add_argument('--gate-lr', type=float, default=None, help='lr of the gate logits theta (session A); overrides cfg gate_lr')
+    parser.add_argument('--no-gate', action='store_true', help='session A without the trainable weight vector (fixed channels)')
+    parser.add_argument('--pca-channels', type=int, default=0,
+                        help='replace the N filter responses by their top-K principal directions, whitened with the training band '
+                             'statistics (a well-conditioned, information-complete input; the response matrix has rank ~11); implies --no-gate')
     parser.add_argument('--raw-bands', action='store_true',
                         help='control run: feed the raw cube bands of --band-range straight into YOLO (identity projection, '
                              'band-statistics standardisation, no weight vector) instead of EC filter responses; pass it again with --eval/--resume')

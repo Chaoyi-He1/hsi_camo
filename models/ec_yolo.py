@@ -151,6 +151,27 @@ class ECYolo(nn.Module):
             crit.update()
 
 
+def pca_whitened_channels(R, mean, std, band_cov, k):
+    '''
+    Top-k principal directions of the standardised responses z = (R^T x - mean) / std under the training band covariance,
+    returned as an equivalent (R', mean', std') so the FilterBank stays a linear projection + standardisation:
+    u = V^T z = (R D^-1 V)^T x - V^T D^-1 mean, with std' = sqrt(eigenvalues) so every output channel has unit variance.
+    Why: the 344 EC responses span an ~11-dimensional subspace (adjacent voltages 0.9998 cosine-similar), so feeding them
+    all gives the first conv a near-singular input; k whitened directions keep the information and fix the conditioning.
+    '''
+    R = np.asarray(R, np.float64); mean = np.asarray(mean, np.float64); std = np.asarray(std, np.float64)
+    assert 1 <= k <= R.shape[1], f"pca_channels={k} must be in [1, {R.shape[1]}]"
+    Dinv = 1.0 / std                                                                  # [N]
+    C = (R * Dinv).T @ np.asarray(band_cov, np.float64) @ (R * Dinv)                  # [N, N] covariance of z
+    evals, evecs = np.linalg.eigh(C)
+    order = np.argsort(evals)[::-1][:k]
+    V, lam = evecs[:, order], np.maximum(evals[order], 1e-12)                         # [N, k], [k]
+    R_new = (R * Dinv) @ V                                                            # [n_bands, k]
+    mean_new = V.T @ (Dinv * mean)                                                    # [k]
+    std_new = np.sqrt(lam)                                                            # [k]
+    return R_new.astype(np.float32), mean_new.astype(np.float32), std_new.astype(np.float32), np.arange(1, k + 1, dtype=np.float64)
+
+
 def build_ec_yolo(args, dataset):
     '''Session A: all selected voltages + weight vector; session B: fixed channels, no weight vector (initialised by slice_to_channels).'''
     if getattr(args, 'raw_bands', False):
@@ -162,7 +183,11 @@ def build_ec_yolo(args, dataset):
         volts, weight_vector = dataset.wavelens.copy(), False                            # 'voltages' = band centres (nm)
     else:
         R, mean, std, volts = dataset.filter_bank_tensors()
-        weight_vector = (args.session == 'A')
+        weight_vector = (args.session == 'A') and not getattr(args, 'no_gate', False)
+        k = int(getattr(args, 'pca_channels', 0) or 0)
+        if k > 0:
+            R, mean, std, volts = pca_whitened_channels(R, mean, std, dataset._band_stats()[1], k)
+            weight_vector = False
     fb = FilterBank(R, mean, std, weight_vector=weight_vector)
     pretrained = None if args.pretrained == 'none' else (download_pretrained(args.yolo_variant) if args.pretrained == 'auto' else args.pretrained)
     yolo, n_matched, n_total = build_detection_model(args.yolo_variant, fb.n_channels, pretrained, nc=1, epochs=args.epochs)
