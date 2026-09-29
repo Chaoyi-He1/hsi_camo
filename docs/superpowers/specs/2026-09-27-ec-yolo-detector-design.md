@@ -213,7 +213,20 @@ Best single-epoch val values during A (all candidates): recall50 0.58 (ep 44), A
 
 **Why the filter path underperforms (diagnostics on 8 val frames, `tmp/filter_diag.py`).** Normalisation is not the cause: the standardised response channels have std 0.21–0.33 (no channel below 5 % of the median, so nothing is noise-amplified), |mean|/std 1.0–1.6, fp16-cache quantisation noise 2·10⁻⁴ of the signal after standardisation, per-frame mean offsets 0.06 std, and the observed/predicted std ratio (0.41–0.88) is the same within-scene shrinkage the raw bands show; the raw control uses the identical p99 scaling and band-statistics standardisation. Two real causes: (a) *spectral resolution* — the aligned response matrix R (133×344, L1 columns) has effective rank 6 (99 % energy) / 11 (99.9 %), median FWHM 112 nm (36–311) against 3 nm bands, adjacent voltages 0.9998 cosine-similar; object-vs-background separability drops from a Mahalanobis distance of 3.21 (raw) to 2.80 (responses; 68–95 % kept per frame, mean 87 %) and the best single-feature Fisher ratio from 1.24 (raw, the 798 nm red edge in half the frames) to 0.89; (b) *conditioning* — 344 channels spanning an 11-dimensional subspace give the first conv a near-singular input, which matches the ≈ 4× slower learning of session A and a gate with no signal to break symmetry. Decisive follow-up: train the filter model from scratch on the 11 PCA-whitened response directions (`--pca-channels 11`, no gate) or on 12 uniformly spaced voltages; parity with the raw model would mean the pipeline loss was conditioning, a plateau near AP50 0.5 would mean it is the sensor's bandwidth.
 
-**Control (`raw133_A`, `--raw-bands`: the 133 raw bands of 400–800 nm straight into YOLO26s, identity projection, no gate, W&B `ku0jkcha`):** running; its val/test numbers against session A are appended here when finished.
+**Control (`raw133_A`, `--raw-bands`: the 133 raw bands of 400–800 nm straight into YOLO26s, identity projection, no gate, same recipe otherwise, W&B `ku0jkcha`, 100 epochs, 7 h 49 min).** The raw bands learn ≈ 4× faster (val recall50 0.55 at epoch 3 vs epoch ≈ 40 for A) and plateau far higher. `model_best` under `select_keys` = **epoch 57**; mean of the last 10 epochs (val): AP50 0.67, recall50 0.77, coverage_recall99_roi 0.78, coverage_recall99_roi_op 0.67. Best single-epoch val values: AP50 0.72 (ep 84), recall50 0.84 (ep 37/57), matched IoU 0.84 (ep 24), tightness 0.86 (ep 49).
+
+| best checkpoint, test split (70 fr / 71 obj) | A: 344 responses + gate (`model_89`) | B: top-10 responses (ep 25) | raw 133 bands (ep 57) |
+|---|---|---|---|
+| recall50 / AP50 | 0.563 / 0.444 | 0.521 / 0.356 | **0.761 / 0.645** |
+| matched IoU | 0.722 | 0.683 | **0.814** |
+| coverage_recall99_raw / _roi (all candidates) | 0.366 / 0.690 | 0.268 / 0.620 | **0.549 / 0.803** |
+| tightness / center_offset (all candidates) | 0.449 / 0.271 | 0.608 / 0.177 | **0.753 / 0.072** |
+| recall50_op / coverage_recall99_roi_op (conf ≥ 0.02, top 5) | 0.493 / 0.549 | 0.437 / 0.465 | **0.732 / 0.761** |
+| contain_rate_op / tightness_op / center_offset_op | 0.183 / 0.565 / 0.077 | 0.169 / 0.633 / 0.110 | **0.324 / 0.739 / 0.075** |
+| candidates per frame (conf ≥ 0.001 / operating point) | 4.6 / 1.16 | 8.2 / 1.70 | 12.4 / 1.93 |
+| val (28 fr / 31 obj): recall50 / AP50 / cov99_roi_op | 0.452 / 0.300 / 0.548 | 0.613 / 0.423 / 0.613 | **0.839 / 0.623 / 0.774** |
+
+*Reading.* On unseen data the raw bands find 76 % of the camouflaged objects at IoU 0.5 and put 76 % of them fully inside an exported ROI at 1.9 ROIs per frame, against 56 % / 55 % for the 344 filter responses: the EC filter path costs roughly a fifth of the objects and 0.2 AP50 on this task. The raw run is an upper bound (the deployed sensor only delivers responses); the diagnostics above attribute the gap to the responses' spectral resolution (effective rank 6–11, FWHM ≈ 112 nm, 87 % of the object/background separability kept) and to the conditioning of a 344-channel input that spans 11 dimensions. Next experiment (implemented, `bash_files/launch_pca11.sh`): the filter model on 11 whitened principal response directions (or 12 uniform voltages), no gate — parity with the raw run would mean the pipeline loss was conditioning, a plateau near AP50 0.5 would mean it is the sensor's bandwidth.
 
 ## 11. Out of scope
 
