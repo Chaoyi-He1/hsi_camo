@@ -228,6 +228,38 @@ Best single-epoch val values during A (all candidates): recall50 0.58 (ep 44), A
 
 *Reading.* On unseen data the raw bands find 76 % of the camouflaged objects at IoU 0.5 and put 76 % of them fully inside an exported ROI at 1.9 ROIs per frame, against 56 % / 55 % for the 344 filter responses: the EC filter path costs roughly a fifth of the objects and 0.2 AP50 on this task. The raw run is an upper bound (the deployed sensor only delivers responses); the diagnostics above attribute the gap to the responses' spectral resolution (effective rank 6–11, FWHM ≈ 112 nm, 87 % of the object/background separability kept) and to the conditioning of a 344-channel input that spans 11 dimensions. Next experiment (implemented, `bash_files/launch_pca11.sh`): the filter model on 11 whitened principal response directions (or 12 uniform voltages), no gate — parity with the raw run would mean the pipeline loss was conditioning, a plateau near AP50 0.5 would mean it is the sensor's bandwidth.
 
+**PCA-11 follow-up (`pca11_A`, `bash bash_files/launch_pca11.sh`: session A from scratch on the 11 PCA-whitened response directions, no gate, W&B `beuhl194`, 100 epochs, 8 h 03 min, 2026-09-29).** Pre-flight on real frames: fp16 compute and the fp16 cache add ≤ 0.9 % noise to every whitened channel (fp64 comparison), so the weak directions survive the pipeline. The whitened input learns fastest of all runs — 3-epoch-mean val AP50 ≥ 0.3 at epoch 5 (raw 11, A 37) — but the lead over raw is gone by epoch ≈ 35 and the late val plateau is AP50 ≈ 0.62 (raw 0.66–0.68). `model_best` = **epoch 24**: the operating-point rule never improved on (0.710, 0.710) afterwards, so the automatic test line comes from an early model and the comparison below also uses fixed checkpoints. Evaluation: `docs/reports/2026-09-29-pca11-robustness/robust_eval.py` (inference only; re-evaluating each run's stored checkpoint reproduces its recorded test numbers exactly), 95 % CIs from a paired bootstrap over the 70 test frames (2000 resamples).
+
+| test split (70 fr / 71 obj) | PCA-11 | raw 133 bands | A: 344 responses + gate |
+|---|---|---|---|
+| `model_best`: recall50 / AP50 / matched IoU | 0.746 / 0.620 / 0.791 (ep 24) | 0.761 / 0.645 / 0.814 (ep 57) | 0.563 / 0.444 / 0.722 (`model_89`) |
+| `model_best`: recall50_op / coverage_recall99_roi_op / boxes per frame at the operating point | 0.690 / 0.732 / 1.73 | 0.732 / 0.761 / 1.93 | 0.493 / 0.549 / 1.16 |
+| fixed checkpoints `model_59` … `model_99`, mean AP50 / recall50 | 0.663 / 0.766 | 0.662 / 0.749 | `model_99` alone: 0.522 / 0.606 |
+
+Paired differences: PCA-11 − raw over the five fixed checkpoints AP50 +0.001 [−0.094, +0.098], recall50 +0.017 [−0.070, +0.107] (at `model_99` −0.023 [−0.136, +0.092]; at `model_best` −0.025 [−0.129, +0.078]); PCA-11 `model_99` − A `model_89` AP50 +0.214 [+0.084, +0.352], recall50 +0.211 [+0.096, +0.329].
+
+*Robustness* (same script; the perturbation acts inside the filter bank, the trained weights are unchanged). Read noise: i.i.d. Gaussian per bias-voltage reading (per band for raw), σ = the channel's mean absorbed signal / 10^(dB/20) in p99 units (auto-exposure); for PCA-11 the 344 per-voltage noises pass through its fixed 344 → 11 map. The only measured device figure (ECHSE SI Fig. S7) is ≈ 0.63 % per reading, ≈ 44 dB, under 20 mW/cm² bench light. Bias offset: every voltage lands dv higher (hysteresis / drift). Gain error: fixed per-voltage N(0, 1 %). Device-1: the measured `R_Device1.mat` responses (per-voltage least-squares gain) instead of the EC_filterV3 interpolant. The perturbed response columns change by a median 1.1 % (+5 mV), 4.4 % (+20 mV), 0.66 % (gain) and 0.36 % (Device-1). "Re-measured" re-standardises each channel with the perturbed device's own mean/std.
+
+| condition, test AP50 / recall50 | PCA-11 `model_99` | A `model_89` | B `model_best` (ep 25) | raw 133 `model_99` |
+|---|---|---|---|---|
+| clean | 0.658 / 0.775 | 0.444 / 0.563 | 0.356 / 0.521 | 0.681 / 0.761 |
+| read noise 50 dB | 0.705 / 0.789 | 0.444 / 0.563 | 0.356 / 0.521 | 0.680 / 0.761 |
+| read noise 40 dB | 0.621 / 0.704 | 0.445 / 0.563 | 0.354 / 0.521 | 0.681 / 0.761 |
+| read noise 30 dB | **0.148 / 0.155** | 0.450 / 0.563 | 0.343 / 0.507 | 0.676 / 0.761 |
+| bias +5 mV | **0.409 / 0.507** | 0.452 / 0.563 | 0.365 / 0.521 | – |
+| bias +20 mV | **0.036 / 0.070** | 0.437 / 0.549 | – | – |
+| 1 % per-voltage gain error | **0.479 / 0.535** | 0.446 / 0.563 | – | – |
+| measured Device-1 response | **0.459 / 0.535** | 0.455 / 0.563 | 0.357 / 0.507 | – |
+| +5 mV, channel mean/std re-measured | 0.444 / 0.521 | – | – | – |
+| 1 % gain, re-measured | 0.471 / 0.549 | – | – | – |
+| Device-1, re-measured | 0.548 / 0.620 | – | – | – |
+| u9–u11 set to their training mean | 0.382 / 0.493 | – | – | – |
+| u6–u11 set to their training mean | 0.149 / 0.197 | – | – | – |
+
+Paired differences to clean (PCA-11): 30 dB −0.510 AP50 [−0.643, −0.391]; 40 dB −0.037 [−0.123, +0.064]; +5 mV −0.249 [−0.363, −0.124]; gain −0.180 [−0.297, −0.059]; Device-1 −0.199 [−0.322, −0.068], re-measured −0.110 [−0.225, +0.007]; u9–u11 −0.277 [−0.417, −0.135]. For A every perturbation stays within ±0.011 AP50.
+
+*Reading.* On the noiseless simulation the EC responses carry the information: PCA-11 matches the raw bands on test (fixed checkpoints, CI ± 0.1 AP50) and beats A by 0.21 AP50 (`model_99` vs `model_89`, paired) and B by 0.26 (`model_best` vs `model_best`). A's deficit was input conditioning (344 channels in an ≈ 11-dimensional span, condition number 2.75·10⁶ over its top 11 directions against 1 after whitening), B's additionally the gate's redundancy-blind top-10 (two clusters of near-duplicate voltages). This is the "parity → conditioning" outcome, with two caveats. (1) The raw input is itself ill-conditioned (condition number 3.8·10⁴), so the raw ceiling may be beatable by whitened raw bands; a raw-PCA control (e.g. 40 components, `--pca-channels` with `--raw-bands`, not yet supported) completes the {responses, raw} × {standardised, whitened} comparison before any residual gap is blamed on the sensor. (2) Parity holds only without sensor error. Whitening makes the detector rely on directions 8–11 (together 5.9·10⁻⁶ of the response variance; zeroing u9–u11 costs 0.28 AP50), and per-reading noise at 30 dB, a 5 mV bias offset, a 1 % gain error or the device's own measured response cost 0.18–0.51 AP50, while A and B — which never learned to use those directions — are unaffected by all of them. Re-measuring each channel's statistics on the device recovers at most half: even after it, the correlation of u11 with its nominal version is only 0.36 under +5 mV or Device-1 (u8 0.58 under +5 mV, u9 0.79 under Device-1), i.e. the fixed 344 → 11 map mixes channels rather than merely offsetting them. A deployable version therefore needs a handful of well-spread voltages (a pixel-level analysis on 2026-09-29, not in the repo, found that 12 voltages — −0.89, −0.69, −0.35, −0.05, 0.08, 0.14, 0.40, 0.84, 1.37, 1.54, 2.25, 2.43 V — reproduce all 11 whitened directions in the noiseless limit and no 11-voltage set does), a regularised whitening with fewer components, training with read-noise and bias/gain perturbation augmentation, and per-device calibration.
+
 ## 11. Out of scope
 
 Downsampling, multi-scale/mosaic augmentation, other YOLO sizes or the `-p2` head (no pretrained weights), DDP tuning beyond Spec_Occu's pattern, Stage 2 implementation.
