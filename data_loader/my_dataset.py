@@ -10,7 +10,7 @@ import torch
 from PIL import Image
 
 from data_loader.ec_filter import (N_BANDS, WAVELENS_200, band_indices, load_ec_filter, align_filter_to_wavelens,
-                                   select_filter_channels)
+                                   select_filter_channels, candidate_indices)
 from data_loader.band_stats import STATS_CROP_SIZE, default_stats_path, load_band_stats, compute_band_stats
 
 GT_THRESHOLD = 127            # GT pngs are JPEG-compressed with 3 identical channels; foreground = channel 0 > 127
@@ -133,6 +133,7 @@ class HyperCOD_data(Dataset.Dataset):
         '''
         self.sensor_wavelens, self.voltages, R_raw = load_ec_filter(self.filter_path)   # [C_s], [N_all], [C_s, N_all]
         R_aligned, self.valid_band_mask = align_filter_to_wavelens(self.sensor_wavelens, R_raw, self.wavelens)  # [C, N_all]
+        self.R_aligned_all = R_aligned  # [C, N_all] float64, every voltage of the file, peak-normalised (candidate_filter_matrix)
         self.selected_indices = select_filter_channels(R_aligned, self.voltages, num_filters=self.num_filters,
                                                        mode=self.filter_select, filter_voltages=self.filter_voltages)
         self.selected_voltages = self.voltages[self.selected_indices]  # [N]
@@ -219,6 +220,19 @@ class HyperCOD_data(Dataset.Dataset):
         mean = R.T @ mu  # [N]
         std = np.sqrt(np.maximum(np.einsum('bn,bc,cn->n', R, cov, R), 0.0))  # [N]
         return self.sensor_R_matrix.astype(np.float32), mean.astype(np.float32), std.astype(np.float32), self.selected_voltages.copy()
+
+    def candidate_filter_matrix(self):
+        '''
+        (R [n_bands, N_cand] float32, voltages [N_cand]) for EVERY usable voltage of the response file (outside the dead
+        zone), normalised like sensor_R_matrix and independent of filter_select: the read-noise floor of a real readout is
+        a property of the device, not of the voltages chosen, so models.ec_yolo.read_noise_std takes its reference from
+        this matrix. The selected columns are bitwise equal to the corresponding columns of sensor_R_matrix.
+        '''
+        cand = candidate_indices(self.voltages)  # [N_cand]
+        R = self.R_aligned_all[:, cand].astype(np.float32)  # [C, N_cand]
+        if self.filter_norm == 'l1':
+            R = (R / np.abs(R).sum(axis=0)).astype(np.float32)  # same per-column gain as load_sensor_response
+        return R, self.voltages[cand].copy()
 
     def load_gt(self, name):
         '''GT pngs are JPEG-compressed with 3 identical channels; foreground = channel 0 > 127. Returns bool [H, W].'''

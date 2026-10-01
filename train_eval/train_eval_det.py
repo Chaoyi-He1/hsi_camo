@@ -105,8 +105,12 @@ def evaluate(model, data_loader, device, conf_thres=0.001, iou_thres=0.6, max_de
             d[:, [0, 2]] = d[:, [0, 2]].clip(0, W); d[:, [1, 3]] = d[:, [1, 3]].clip(0, H)   # padding is bottom/right: coords unchanged
             metrics.update(mask, d)
             if logger is not None and logged < n_images_log:
+                # this extra filter-bank forward must not advance the bank's eval-mode read-noise sequence, or the
+                # following frames would see different noise from main_det_compare's pass over the same frames
+                state = model.filter_bank.noise_state()
                 with torch.autocast(device.type, enabled=amp and device.type == 'cuda'):
                     y = model.filter_bank(model.pad_to_stride(img[b:b + 1])[0])[0, :, :H, :W]
+                model.filter_bank.set_noise_state(state)
                 pic = false_colour(y)
                 pic = draw_boxes(pic, boxes_from_mask(mask, min_area=min_area), (0, 255, 0))
                 top = filter_to_operating_point(d, roi_conf, roi_topk)       # the boxes the ROI export would keep

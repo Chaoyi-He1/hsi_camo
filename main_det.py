@@ -7,6 +7,9 @@ Session B (top-10 voltages from A, no weight vector), initialised from A:
   python main_det.py --session B --top_k 10 --ranking weights/det_A/gate_ranking.csv --resume weights/det_A/model_best --name det_B --output-dir weights/det_B
 Evaluate a checkpoint on val + test:
   python main_det.py --session B --resume weights/det_B/model_best --eval
+Fixed voltages chosen by main_select_voltages.py, a 40 dB read-noise floor and noise-regularised whitening (spec §12):
+  python main_det.py --session A --filter-select manual --filter-voltages 1.75 -0.44 1.36 0.48 -0.65 -0.36 1.70 0.01 -0.86 1.45 \
+      --pca-channels 10 --read_noise_db 40 --name sel10g_A --output-dir weights/sel10g_A
 DDP (2 GPUs):
   torchrun --nproc_per_node=2 main_det.py --session A --name det_A --output-dir weights/det_A
 Without torchrun this script pins CUDA_VISIBLE_DEVICES=0 (see the top of the file) unless it is already set.
@@ -68,6 +71,13 @@ def get_args_parser():
     parser.add_argument('--raw-bands', action='store_true',
                         help='control run: feed the raw cube bands of --band-range straight into YOLO (identity projection, '
                              'band-statistics standardisation, no weight vector) instead of EC filter responses; pass it again with --eval/--resume')
+    parser.add_argument('--read_noise_db', type=float, default=0.0,
+                        help='simulate Gaussian read noise on every filter reading at this SNR (dB) inside the FilterBank, in training '
+                             'and (reproducibly) in evaluation; with --pca-channels the whitening is regularised by the same noise. 0 disables; '
+                             'pass it again with --eval/--resume (the model is rebuilt from the CLI flags)')
+    parser.add_argument('--read_noise_model', type=str, default='floor', choices=['floor', 'relative'],
+                        help='floor: one absolute noise floor for every reading, so weak readings get the worst SNR (models.ec_yolo.read_noise_std); '
+                             'relative: every reading at the same SNR (per-reading auto-exposure)')
     parser.add_argument('--select-keys', nargs='+', default=None, help='val summary keys that rank checkpoints (primary first); overrides cfg select_keys')
     parser.add_argument('--contain-weight', type=float, default=None, help='overrides cfg')
     # data
