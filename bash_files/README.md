@@ -12,6 +12,7 @@ them from anywhere: `bash bash_files/<script>.sh`. `PY` (python binary) and the 
 | `launch_raw133.sh` | control run: raw 133 bands (400-800 nm) into YOLO, no filter, no gate (GPU 1 by default) |
 | `launch_pca11.sh` | filter model on the K PCA-whitened response directions (default K=11), no gate; `UNIFORM=12` for a uniform-voltage control |
 | `launch_sel10_queue.sh` | three fixed-10-voltage runs in sequence (greedy / session-B / uniform voltages, 40 dB read noise, whitened), then `main_det_compare.py` on their fixed checkpoints |
+| `launch_sel_followup.sh` | waits for the queue above, then the 24-voltage greedy run (40 dB) and the 10-voltage greedy run without read noise, then `main_det_compare.py` over all five |
 | `copy_cache_to_nvme.sh` | optional: mirror the 181 GB fp16 frame cache to the NVMe `/home` partition (ask first) |
 
 Background runs use `python -u` (redirected stdout is block-buffered otherwise) and `setsid nohup`, so they survive the
