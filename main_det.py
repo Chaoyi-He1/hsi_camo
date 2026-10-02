@@ -75,6 +75,10 @@ def get_args_parser():
                         help='simulate Gaussian read noise on every filter reading at this SNR (dB) inside the FilterBank, in training '
                              'and (reproducibly) in evaluation; with --pca-channels the whitening is regularised by the same noise. 0 disables; '
                              'pass it again with --eval/--resume (the model is rebuilt from the CLI flags)')
+    parser.add_argument('--read_noise_db_range', type=float, nargs=2, default=None,
+                        help='SNR augmentation: draw the training read-noise level log-uniformly between these two dB values for every batch '
+                             '(e.g. 34 50); the whitening and the evaluation keep --read_noise_db. A model trained at one fixed level works only '
+                             'at that level (spec §12)')
     parser.add_argument('--read_noise_model', type=str, default='floor', choices=['floor', 'relative'],
                         help='floor: one absolute noise floor for every reading, so weak readings get the worst SNR (models.ec_yolo.read_noise_std); '
                              'relative: every reading at the same SNR (per-reading auto-exposure)')

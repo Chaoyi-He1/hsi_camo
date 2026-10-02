@@ -47,6 +47,34 @@ def test_read_noise_is_fresh_in_training_and_reproducible_in_eval():
     assert fb.state_dict()['noise_std'].shape == (1, 5, 1, 1)
 
 
+def test_train_scale_range_varies_the_noise_level_in_training_only():
+    R, mean, std = _bank()
+    sig = np.full(5, 0.02, np.float32)
+    fb = FilterBank(R, mean, std, weight_vector=False, noise_std=sig, train_scale_range=(0.5, 2.0))
+    clean = FilterBank(R, mean, std, weight_vector=False)
+    x = torch.rand(1, 133, 32, 32)
+    torch.manual_seed(0)
+    fb.train()
+    levels = np.array([float((fb(x) - clean(x)).std()) for _ in range(40)]) / float(sig[0] / std[0])   # noise std per batch, in units of sigma / std
+    assert levels.min() < 0.7 and levels.max() > 1.5 and (levels > 0.45).all() and (levels < 2.1).all()   # log-uniform in [0.5, 2]
+    fb.eval()
+    level = float((fb(x) - clean(x)).std()) / float(sig[0] / std[0])
+    assert abs(level - 1.0) < 0.1                                                         # evaluation at the nominal level
+    with pytest.raises(AssertionError):
+        FilterBank(R, mean, std, weight_vector=False, train_scale_range=(0.5, 2.0))        # needs noise_std
+
+
+def test_build_ec_yolo_read_noise_db_range(synthetic_root):
+    root, _, _ = synthetic_root
+    ds = _ds(root)
+    base = dict(yolo_variant='yolo26n', pretrained='none', gate_entropy_weight=0.05, contain_weight=1.0, epochs=1, session='A', seed=0,
+                read_noise_db=40.0, read_noise_model='floor', no_gate=False, pca_channels=3)
+    m = build_ec_yolo(types.SimpleNamespace(**base, read_noise_db_range=[34.0, 50.0]), ds)
+    lo, hi = m.filter_bank.train_scale_range
+    assert abs(lo - 10 ** (-10 / 20)) < 1e-6 and abs(hi - 10 ** (6 / 20)) < 1e-6         # 50 dB -> 0.316x sigma, 34 dB -> 2.0x sigma
+    assert build_ec_yolo(types.SimpleNamespace(**base, read_noise_db_range=None), ds).filter_bank.train_scale_range is None
+
+
 def test_noise_state_rewinds_the_eval_sequence():
     R, mean, std = _bank()
     fb = FilterBank(R, mean, std, weight_vector=False, noise_std=np.full(5, 0.02, np.float32), eval_seed=1)

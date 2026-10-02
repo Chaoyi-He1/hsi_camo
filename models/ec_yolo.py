@@ -246,10 +246,19 @@ def build_ec_yolo(args, dataset):
                 V, lam = pca_whitening(R, mean, std, cov, k, noise_var=(noise_std / std) ** 2)
                 proj, volts = (V / np.sqrt(lam)).astype(np.float32), np.arange(1, k + 1, dtype=np.float64)
             weight_vector = False
-    fb = FilterBank(R, mean, std, weight_vector=weight_vector, noise_std=noise_std, proj=proj, eval_seed=int(getattr(args, 'seed', 0) or 0))
+    scale_range = None
+    db_range = getattr(args, 'read_noise_db_range', None)
+    if noise_std is not None and db_range:
+        # SNR augmentation: the noise level seen in training varies log-uniformly between the two dB values (as multipliers
+        # of the nominal sigma); the whitening and the evaluation keep the nominal --read_noise_db
+        lo_db, hi_db = sorted(float(v) for v in db_range)
+        scale_range = (10 ** ((noise_db - hi_db) / 20), 10 ** ((noise_db - lo_db) / 20))
+    fb = FilterBank(R, mean, std, weight_vector=weight_vector, noise_std=noise_std, proj=proj, eval_seed=int(getattr(args, 'seed', 0) or 0),
+                    train_scale_range=scale_range)
     if noise_std is not None:
         print(f"read noise {noise_db:g} dB ({noise_model}): sigma {noise_std.min():.3g}-{noise_std.max():.3g} per reading"
-              + (f", whitening of {fb.n_readings} readings -> {fb.n_channels} channels regularised by it" if proj is not None else ""))
+              + (f", whitening of {fb.n_readings} readings -> {fb.n_channels} channels regularised by it" if proj is not None else "")
+              + (f", training level drawn from {lo_db:g}-{hi_db:g} dB per batch" if scale_range is not None else ""))
     pretrained = None if args.pretrained == 'none' else (download_pretrained(args.yolo_variant) if args.pretrained == 'auto' else args.pretrained)
     yolo, n_matched, n_total = build_detection_model(args.yolo_variant, fb.n_channels, pretrained, nc=1, epochs=args.epochs)
     print(f"{args.yolo_variant}: {fb.n_channels} input channels, pretrained tensors reused {n_matched}/{n_total}")

@@ -18,14 +18,18 @@ class FilterBank(nn.Module):
                      (ec_yolo.read_noise_std: a floor of eps * s0 for every reading). Drawn fresh in training; in eval
                      mode drawn from the bank's own generator, which eval() reseeds, so every validation pass sees the
                      same noise (frames are read in a fixed order). noise_scale (a plain float, not state) multiplies
-                     it: 0 evaluates a noise-trained model on clean readings.
+                     it: 0 evaluates a noise-trained model on clean readings. train_scale_range (lo, hi) draws, in
+                     training mode only, a further log-uniform multiplier of the noise std per forward (SNR augmentation):
+                     a model trained at one fixed noise level works only at that level (test AP50 halves 2 dB away,
+                     spec §12), so the level the network sees has to vary during training.
       proj [N, K]    fixed linear map applied to the standardised readings, u = proj^T z (ec_yolo.pca_whitening with
                      the noise variance folded in); the bank then outputs K channels and carries no weight vector.
                      Keeping the N readings explicit, instead of folding proj into R, is what puts the noise where a
                      device adds it: on each reading, before the whitening amplifies the weak directions.
     '''
 
-    def __init__(self, R, channel_mean, channel_std, weight_vector=True, init_logits=None, noise_std=None, proj=None, eval_seed=0):
+    def __init__(self, R, channel_mean, channel_std, weight_vector=True, init_logits=None, noise_std=None, proj=None, eval_seed=0,
+                 train_scale_range=None):
         super(FilterBank, self).__init__()
         R = torch.as_tensor(np.asarray(R), dtype=torch.float32)                   # [n_bands, N]
         assert R.ndim == 2, f"R must be [n_bands, N], got {tuple(R.shape)}"
@@ -56,6 +60,10 @@ class FilterBank(nn.Module):
         else:
             self.proj = None
         self.noise_scale = 1.0
+        self.train_scale_range = None if train_scale_range is None else (float(train_scale_range[0]), float(train_scale_range[1]))
+        if self.train_scale_range is not None:
+            assert noise_std is not None, "train_scale_range needs noise_std"
+            assert 0 < self.train_scale_range[0] <= self.train_scale_range[1], f"train_scale_range must be 0 < lo <= hi, got {train_scale_range}"
         self.eval_seed = int(eval_seed)
         self._gen = None                                                           # eval-mode noise generator, see train()
 
@@ -103,7 +111,11 @@ class FilterBank(nn.Module):
     def _standardise(self, y):
         '''Read noise on every reading, then the per-channel standardisation.  y: [B, N, H, W] readings'''
         if self.noise_std is not None and self.noise_scale > 0:
-            y = y + self._noise(y) * (self.noise_std.to(y.dtype) * self.noise_scale)
+            scale = self.noise_scale
+            if self.training and self.train_scale_range is not None:
+                lo, hi = self.train_scale_range                                    # SNR augmentation: one log-uniform level per batch
+                scale = scale * lo * (hi / lo) ** float(torch.rand(()))
+            y = y + self._noise(y) * (self.noise_std.to(y.dtype) * scale)
         return (y - self.mean.to(y.dtype)) / self.std.to(y.dtype)
 
     def forward(self, x):
