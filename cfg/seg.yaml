@@ -1,0 +1,39 @@
+# Stage-2 segmentation hyper-parameters (spec §7). main_seg.load_cfg fills every flag left at None and every key that has no
+# flag: first the common keys below, then the section of --seg_model under `models` overrides them; an explicit CLI flag
+# always wins. Floats are written with a dot (1.0e-4): PyYAML reads a bare 1e-4 as a string.
+epochs: 200                   # ~7 k optimizer steps at batch 8 over ~290 objects + fp items per epoch
+batch_size: 8
+accumulate: 1                 # gradient accumulation steps
+lr: 1.0e-4                    # model lr (per-model value below)
+stem_lr: 1.0e-4               # the folded N+1-channel stem (its own AdamW group, param_groups(args))
+lrf: 0.01                     # final lr = lr * lrf, cosine per epoch (as main_det)
+weight_decay: 1.0e-4          # AdamW (SAM2-UNet's own recipe uses 5e-4; spec §7 deliberately uses 1e-4 for all models)
+max_norm: 1.0                 # gradient clipping on the accumulated gradient
+amp_dtype: bfloat16           # autocast dtype of the model forward on CUDA (bf16: no GradScaler); the front end always runs in fp32
+canvas: 512                   # ROI canvas side (px); multiple of 32 (Hiera windows), of 64 for ZoomNeXt (its 0.5x scale)
+box_mix: [0.5, 0.4, 0.1]      # training items: expanded GT boxes / matched detector boxes / false-positive detector boxes
+gt_jitter: 0.15               # each side of an expanded GT box moves OUTWARD by U(0, gt_jitter) x box side
+roi_margin: 1.5               # the Stage-1 export rule: ROI = box grown 1.5x about its centre ...
+roi_min: 256                  # ... and at least 256 px per side (cfg/det.yaml roi_margin / roi_min)
+scale_aug: [0.75, 1.25]       # training: ROI content rescaled by U(lo, hi) before placement on the canvas
+gain_aug: 0.05                # training: per-band gain U(1 - gain_aug, 1 + gain_aug)
+fit_pixels: 2000000           # stem fold (P, q): at most this many training pixels ...
+fit_items: 64                 # ... drawn evenly from this many deterministic training items (each read once)
+size_edges: [2000, 20000]     # object-size buckets by GT area (px): small < 2000 <= medium <= 20000 < large
+save_every: 10                # model_last every N epochs and at the end (each full state_dict is ~0.9 GB for the Hiera-L models)
+print_freq: 10
+models:
+  sam2unet:                   # adapters + RFB + U-Net decoder at 1e-3 (SAM2-UNet's recipe), Hiera-L trunk frozen
+    lr: 1.0e-3
+    batch_size: 8
+    accumulate: 1
+  sam2box:                    # LoRA (r = 8) + stem + mask decoder at 1e-4; loss = Dice + BCE
+    lr: 1.0e-4
+    batch_size: 8
+    accumulate: 1
+    lora_r: 8
+  zoomnext:                   # full fine-tune; batch 4 x accumulation 2 (the three-scale encoder pass dominates memory)
+    lr: 1.0e-4
+    batch_size: 4
+    accumulate: 2
+    encoder_lr_mult: 1.0      # PVT encoder lr = lr x this (spec §7: 1.0; ZoomNeXt's own recipe uses 0.1)
