@@ -14,7 +14,11 @@ from its channels to the ImageNet-normalised pseudo-RGB render (seg_stem.fit_rgb
 pretrained RGB stem (seg_stem.fold_stem) so the network sees the pseudo-RGB image at initialisation (spec §3).
 '''
 import os
+import sys
 import math
+import types
+import warnings
+import contextlib
 import numpy as np
 import torch
 import torch.nn as nn
@@ -363,8 +367,166 @@ class SAM2BoxSeg(nn.Module):
                 dict(params=decoder, lr=float(args.lr), weight_decay=float(args.weight_decay), name='decoder')]
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# ZoomNeXt-B2
+# ---------------------------------------------------------------------------------------------------------------------
+
+ZOOMNEXT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'third_party', 'zoomnext')
+ZOOMNEXT_CKPT = 'weights/pretrained/pvtv2-b2-zoomnext.pth'                   # COD checkpoint (setup_third_party.sh)
+ZOOMNEXT_SCALES = (0.5, 1.0, 1.5)                                            # image_s / image_m / image_l (main_for_image.ms_resize)
+
+
+@contextlib.contextmanager
+def no_cuda_query():
+    '''
+    ZoomNeXt's PVTv2 (methods/backbone/pvt_v2_eff.py:89, Attention.__init__) calls torch.cuda.get_device_properties('cuda')
+    unconditionally to choose its SDPA kernels, so without a GPU (CPU tests, CUDA_VISIBLE_DEVICES="") construction raises
+    "No CUDA GPUs are available". Stub the query during construction only, and only when CUDA is absent: the clone stays
+    pristine at its pinned commit and a GPU machine takes the original path (A4500 = sm_86 -> math + mem-efficient kernels).
+    '''
+    orig = torch.cuda.get_device_properties
+    if not torch.cuda.is_available():
+        torch.cuda.get_device_properties = lambda *a, **k: types.SimpleNamespace(major=0, minor=0)
+    try:
+        yield
+    finally:
+        torch.cuda.get_device_properties = orig
+
+
+def import_zoomnext(zoomnext_dir=ZOOMNEXT_DIR):
+    '''
+    PvtV2B2_ZoomNeXt from the git-ignored clone (bash_files/setup_third_party.sh, pinned commit). The clone is APPENDED to
+    sys.path: its top-level configs/ and utils/ must not shadow anything, and only its `methods` package is imported
+    (the model code needs timm and einops; ZoomNeXt's own utils/, mmengine and albumentations are not used).
+    '''
+    zoomnext_dir = os.path.realpath(zoomnext_dir)
+    src = os.path.join(zoomnext_dir, 'methods', 'zoomnext', 'zoomnext.py')
+    assert os.path.isfile(src), f"ZoomNeXt code not found at {src}: run bash_files/setup_third_party.sh"
+    if zoomnext_dir not in sys.path:
+        sys.path.append(zoomnext_dir)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', FutureWarning)                       # timm.models.layers is deprecated in timm 1.x
+        import methods
+        from methods.zoomnext.zoomnext import PvtV2B2_ZoomNeXt
+    found = os.path.realpath(os.path.dirname(methods.__file__))
+    assert found == os.path.join(zoomnext_dir, 'methods'), f"`methods` was imported from {found}, not from the ZoomNeXt clone {zoomnext_dir}"
+    return PvtV2B2_ZoomNeXt
+
+
+def zoomnext_ual_coef(t):
+    '''ZoomNeXt's uncertainty-aware loss weight: (1 - cos(pi t)) / 2, 0 -> 1 over training (get_coef, method 'cos', milestones (0, 1)).'''
+    t = min(max(float(t), 0.0), 1.0)
+    return (1.0 - math.cos(math.pi * t)) / 2.0
+
+
+class ZoomNeXtSeg(nn.Module):
+    '''
+    ZoomNeXt-B2 (PvtV2B2_ZoomNeXt from third_party/zoomnext) with its image-COD checkpoint, fully fine-tuned (spec §3, §5.4).
+
+    - Built with input_norm=False: the original PixelNormalizer holds [3, 1, 1] ImageNet buffers that cannot broadcast to
+      N + 1 channels, and the ImageNet normalisation is already inside the folded stem (rgb_norm ~ P z + q).
+    - The checkpoint is loaded into the 3-channel model FIRST (normalizer.* dropped; it lacks the BatchNorm
+      num_batches_tracked buffers, so it is overlaid on the model's own state dict before a strict load, as ZoomNeXt's
+      utils/io/params.py does), THEN encoder.patch_embed1.proj (Conv2d(3, 64, 7, stride 4, pad 3)) is folded into the
+      n_in + 1-channel stem, so the fold starts from the COD-trained RGB kernel. patch_embed1.norm keeps its weights.
+      Unlike the original (get_grouped_params freezes patch_embed1), every parameter trains, the stem included.
+    - forward builds the multi-scale triplet from the canvas, scales 0.5 / 1.0 / 1.5 bilinear (the box channel is
+      resized with it), runs ZoomNeXt's body() in both modes and returns [logits [B, 1, c, c]]; box_xyxy is unused (the
+      box enters through the box channel). The module's own forward() is not used: in training it needs data['mask'] and
+      returns a dict with its own loss.
+    - loss = BCE + ual_coef(t) * mean(1 - |2 p - 1|^2), ZoomNeXt's own loss; t is the training progress set by
+      set_progress() (train_one_epoch calls it every step), defaulting to 1 (the full weight, ZoomNeXt's forward default).
+    The canvas must be divisible by 64 so that the 0.5 scale stays divisible by PVT's stride 32.
+    '''
+
+    def __init__(self, args, n_in, P, q):
+        super(ZoomNeXtSeg, self).__init__()
+        canvas = int(args.canvas)
+        assert canvas % 64 == 0, f"ZoomNeXt needs a canvas divisible by 64 (0.5 scale / PVT stride 32), got {canvas}"
+        Net = import_zoomnext(getattr(args, 'zoomnext_dir', None) or ZOOMNEXT_DIR)
+        with no_cuda_query(), warnings.catch_warnings():
+            warnings.simplefilter('ignore', FutureWarning)
+            net = Net(pretrained=False, num_frames=1, input_norm=False,
+                      use_checkpoint=bool(getattr(args, 'grad_ckpt', False)))   # pretrained=False: the COD ckpt holds the whole encoder
+        ckpt = getattr(args, 'zoomnext_ckpt', None) or None                     # None / '' -> random init (unit tests only)
+        if ckpt is not None:
+            assert os.path.isfile(ckpt), f"--zoomnext_ckpt {ckpt} not found: run bash_files/setup_third_party.sh"
+            sd = torch.load(ckpt, map_location='cpu', weights_only=True)
+            assert isinstance(sd, dict), f"{ckpt}: expected a plain state_dict, got {type(sd).__name__}"
+            sd = {k: v for k, v in sd.items() if not k.startswith('normalizer.')}
+            own = net.state_dict()
+            unexpected = sorted(set(sd) - set(own))
+            missing = sorted(k for k in set(own) - set(sd) if not k.endswith('num_batches_tracked'))
+            assert not unexpected and not missing, f"{ckpt}: unexpected keys {unexpected[:5]}, missing keys {missing[:5]}"
+            bad = [k for k in sd if tuple(sd[k].shape) != tuple(own[k].shape)]
+            assert not bad, f"{ckpt}: shape mismatch on {bad[:5]}"
+            own.update(sd)
+            net.load_state_dict(own, strict=True)
+        old = net.encoder.patch_embed1.proj                                     # Conv2d(3, 64, 7, stride 4, pad 3, bias=True)
+        assert old.in_channels == 3, f"expected the RGB patch_embed1, got {old.in_channels} input channels"
+        net.encoder.patch_embed1.proj = fold_stem(old, P, q, n_extra=1)         # Conv2d(n_in + 1, 64, 7, 4, 3)
+        for p in net.parameters():
+            p.requires_grad = True                                               # full fine-tune, stem included
+        self.net = net
+        self.n_in = int(n_in)
+        self.canvas = canvas
+        self.progress = 1.0
+
+    def set_progress(self, t):
+        '''Training progress t in [0, 1] (iteration / total iterations) for the UAL weight ramp.'''
+        self.progress = float(t)
+
+    def forward(self, x, box_xyxy=None):
+        '''x: [B, n_in + 1, c, c]; box_xyxy unused (API parity). Returns [logits [B, 1, c, c]].'''
+        B, C, h, w = x.shape
+        assert C == self.n_in + 1, f"expected {self.n_in + 1} input channels, got {C}"
+        assert h % 64 == 0 and w % 64 == 0, f"ZoomNeXt needs sides divisible by 64, got {h} x {w}"
+        # SimpleASPP's global-pool branch has a BatchNorm on a [B, 64, 1, 1] map: one item gives a single value per channel,
+        # which BatchNorm rejects in training (the train loader uses drop_last=True)
+        assert B >= 2 or not self.training, f"ZoomNeXt trains on a batch of at least 2 items, got {B}"
+        s, m, l = ZOOMNEXT_SCALES
+        data = {'image_s': F.interpolate(x, size=(int(h * s), int(w * s)), mode='bilinear', align_corners=False),   # [B, C, c/2, c/2]
+                'image_m': x,                                                                                        # [B, C, c, c]
+                'image_l': F.interpolate(x, size=(int(h * l), int(w * l)), mode='bilinear', align_corners=False)}   # [B, C, 1.5c, 1.5c]
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', FutureWarning)                       # pvt_v2_eff's torch.backends.cuda.sdp_kernel is deprecated
+            logits = self.net.body(data)                                         # [B, 1, c, c] (the image_m size)
+        return [logits]
+
+    def loss(self, outputs, mask):
+        logits = outputs[0].float()
+        bce = F.binary_cross_entropy_with_logits(logits, mask.float(), reduction='mean')
+        prob = logits.sigmoid()
+        ual = (1.0 - (2.0 * prob - 1.0).abs().pow(2)).mean()                   # pushes probabilities away from 0.5
+        coef = zoomnext_ual_coef(self.progress)
+        total = bce + coef * ual
+        return total, {'bce': float(bce.detach()), 'ual': float(ual.detach()), 'ual_coef': float(coef)}
+
+    def param_groups(self, args):
+        '''
+        AdamW groups: the stem (encoder.patch_embed1.*, the folded conv and its LayerNorm) at args.stem_lr without weight
+        decay (the convention of Task 8's param_groups_by_name), the rest of the PVT encoder at args.lr *
+        args.encoder_lr_mult (default 1: spec §7, lr 1e-4 for the whole network; the original recipe uses 0.1), the
+        decoder at args.lr.
+        '''
+        mult = float(getattr(args, 'encoder_lr_mult', None) or 1.0)
+        stem, encoder, decoder = [], [], []
+        for name, p in self.net.named_parameters():
+            if not p.requires_grad:
+                continue
+            if name.startswith('encoder.patch_embed1.'):
+                stem.append(p)
+            elif name.startswith('encoder.'):
+                encoder.append(p)
+            else:
+                decoder.append(p)
+        return [dict(params=stem, lr=float(args.stem_lr), weight_decay=0.0, name='stem'),
+                dict(params=encoder, lr=float(args.lr) * mult, weight_decay=float(args.weight_decay), name='encoder'),
+                dict(params=decoder, lr=float(args.lr), weight_decay=float(args.weight_decay), name='decoder')]
+
+
 # --seg_model name -> class. Task 9 adds 'sam2box': SAM2BoxSeg and Task 10 'zoomnext': ZoomNeXtSeg to this one line.
-SEG_MODELS = {'sam2unet': SAM2UNetSeg, 'sam2box': SAM2BoxSeg}
+SEG_MODELS = {'sam2unet': SAM2UNetSeg, 'sam2box': SAM2BoxSeg, 'zoomnext': ZoomNeXtSeg}
 
 
 def build_seg_model(args, n_in, P, q):
