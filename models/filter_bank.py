@@ -15,14 +15,14 @@ class FilterBank(nn.Module):
 
     Two optional stages model a real readout (both off by default, so checkpoints trained without them load unchanged):
       noise_std [N]  i.i.d. Gaussian read noise added to every reading y_n BEFORE the standardisation, in reading units
-                     (ec_yolo.read_noise_std: a floor of eps * s0 for every reading). Drawn fresh in training; in eval
+                     (read_noise_std below: a floor of eps * s0 for every reading). Drawn fresh in training; in eval
                      mode drawn from the bank's own generator, which eval() reseeds, so every validation pass sees the
                      same noise (frames are read in a fixed order). noise_scale (a plain float, not state) multiplies
                      it: 0 evaluates a noise-trained model on clean readings. train_scale_range (lo, hi) draws, in
                      training mode only, a further log-uniform multiplier of the noise std per forward (SNR augmentation):
                      a model trained at one fixed noise level works only at that level (test AP50 halves 2 dB away,
                      spec §12), so the level the network sees has to vary during training.
-      proj [N, K]    fixed linear map applied to the standardised readings, u = proj^T z (ec_yolo.pca_whitening with
+      proj [N, K]    fixed linear map applied to the standardised readings, u = proj^T z (pca_whitening below, with
                      the noise variance folded in); the bank then outputs K channels and carries no weight vector.
                      Keeping the N readings explicit, instead of folding proj into R, is what puts the noise where a
                      device adds it: on each reading, before the whitening amplifies the weak directions.
@@ -130,3 +130,126 @@ class FilterBank(nn.Module):
         with torch.autocast(x.device.type, enabled=False):
             y = torch.einsum('kn,bnhw->bkhw', self.proj, self._standardise(y.float()))   # [B, K, H, W]
         return y.to(x.dtype)
+
+
+def pca_whitening(R, mean, std, band_cov, k, noise_var=None):
+    '''
+    Eigen-decomposition of the covariance of the standardised readings z = (R^T x - mean) / std under the training band
+    covariance: the top-k eigenvectors V [N, k] and eigenvalues lam [k], so u = V^T z / sqrt(lam) are k uncorrelated
+    unit-variance channels. noise_var [N] (per-reading read-noise variance in standardised units, (sigma / std)^2) is
+    added to the diagonal first: the directions are then ordered by signal-plus-noise variance and 1/sqrt(lam) never
+    amplifies a noise-dominated direction beyond unit output noise (a whitening fitted to noise-free statistics gains up
+    to ~1600x on the weakest of 344 responses and breaks on a real readout, see spec §12).
+    '''
+    R = np.asarray(R, np.float64); mean = np.asarray(mean, np.float64); std = np.asarray(std, np.float64)
+    assert 1 <= k <= R.shape[1], f"pca_channels={k} must be in [1, {R.shape[1]}]"
+    Dinv = 1.0 / std                                                                  # [N]
+    C = (R * Dinv).T @ np.asarray(band_cov, np.float64) @ (R * Dinv)                  # [N, N] covariance of z
+    if noise_var is not None:
+        nv = np.asarray(noise_var, np.float64).reshape(-1)
+        assert nv.shape == (R.shape[1],) and (nv >= 0).all(), f"noise_var must be {R.shape[1]} non-negative variances"
+        C = C + np.diag(nv)
+    evals, evecs = np.linalg.eigh(C)
+    order = np.argsort(evals)[::-1][:k]
+    return evecs[:, order], np.maximum(evals[order], 1e-12)                           # [N, k], [k]
+
+
+def pca_whitened_channels(R, mean, std, band_cov, k, noise_var=None):
+    '''
+    Top-k principal directions of the standardised responses z = (R^T x - mean) / std under the training band covariance,
+    returned as an equivalent (R', mean', std') so the FilterBank stays a linear projection + standardisation:
+    u = V^T z = (R D^-1 V)^T x - V^T D^-1 mean, with std' = sqrt(eigenvalues) so every output channel has unit variance.
+    Why: the 344 EC responses span an ~11-dimensional subspace (adjacent voltages 0.9998 cosine-similar), so feeding them
+    all gives the first conv a near-singular input; k whitened directions keep the information and fix the conditioning.
+    noise_var is passed through to pca_whitening (the folded form cannot carry per-reading noise itself: build_filter_bank
+    keeps the readings explicit and hands FilterBank the map as `proj` when read noise is simulated).
+    '''
+    R = np.asarray(R, np.float64); mean = np.asarray(mean, np.float64); std = np.asarray(std, np.float64)
+    V, lam = pca_whitening(R, mean, std, band_cov, k, noise_var)
+    Dinv = 1.0 / std                                                                  # [N]
+    R_new = (R * Dinv) @ V                                                            # [n_bands, k]
+    mean_new = V.T @ (Dinv * mean)                                                    # [k]
+    std_new = np.sqrt(lam)                                                            # [k]
+    return R_new.astype(np.float32), mean_new.astype(np.float32), std_new.astype(np.float32), np.arange(1, k + 1, dtype=np.float64)
+
+
+def read_noise_std(R, mu, cov, snr_db, model='floor', R_ref=None):
+    '''
+    Per-reading Gaussian read-noise std [N], in reading units, for the readings y = R^T x (x in p99 units) at snr_db:
+      floor     one absolute floor for every reading, sigma = s0 / 10^(dB/20), s0 = median over the reference readings
+                of their RMS value sqrt(R_v^T (Sigma + mu mu^T) R_v). R_ref defaults to R; pass the whole usable bank so
+                the floor is a property of the device and not of the voltages chosen. Weak readings get the worst SNR,
+                as under a real read-noise floor; the voltage selection (main_select_voltages) scores sets under it.
+      relative  every reading at the same SNR, sigma_v = |R_v|^T mu / 10^(dB/20) (per-reading auto-exposure; the
+                'noise<dB>' condition of docs/reports/2026-09-29-pca11-robustness/robust_eval.py).
+    '''
+    R = np.asarray(R, np.float64); mu = np.asarray(mu, np.float64); cov = np.asarray(cov, np.float64)
+    eps = 10.0 ** (-float(snr_db) / 20.0)
+    if model == 'floor':
+        Rr = R if R_ref is None else np.asarray(R_ref, np.float64)
+        rms = np.sqrt(np.maximum(np.einsum('bn,bc,cn->n', Rr, cov + np.outer(mu, mu), Rr), 0.0))   # [N_ref]
+        return np.full(R.shape[1], eps * float(np.median(rms)), dtype=np.float32)
+    if model == 'relative':
+        return (eps * (np.abs(R).T @ mu)).astype(np.float32)                                      # [N]
+    raise ValueError(f"unknown read-noise model '{model}', expected floor | relative")
+
+
+def build_filter_bank(args, dataset):
+    '''
+    The input front end of a detector arm, factored out of models.ec_yolo.build_ec_yolo so that Stage 1 (the detector)
+    and Stage 2 (models.seg_models.build_front_end) build it from the same flags and see bit-identical channels.
+      args     the detector's flags (main_det.get_args_parser(), or a checkpoint's ckpt['args']). Every flag except
+               `session` is read through getattr with its Stage-1 default, so older checkpoints (raw133_A has no
+               pca_channels / read_noise_* / no_gate) and the tests' sparse namespaces keep working:
+                 raw_bands            identity over the cube bands, standardised with the training band statistics
+                 (otherwise)          the dataset's selected EC responses (filter_select / filter_voltages / num_filters);
+                                      session A carries the trainable weight vector unless no_gate
+                 pca_channels K       the top-K whitened principal directions of the responses; no weight vector
+                 read_noise_db        per-reading read noise inside the bank (read_noise_std, model read_noise_model)
+                 read_noise_db_range  SNR augmentation of the training noise level
+                 seed                 the eval-mode noise seed
+      dataset  a HyperCOD_data built with main_det.dataset_kwargs(args): band statistics, filter matrices, wavelengths
+    Returns (fb, volts): the FilterBank and np.ndarray [N] of what each channel is (voltages; band centres in nm for
+    raw_bands; 1..K for whitened channels), which build_ec_yolo stores as model.selected_voltages.
+    '''
+    noise_db = float(getattr(args, 'read_noise_db', 0.0) or 0.0)
+    noise_model = getattr(args, 'read_noise_model', None) or 'floor'
+    mu, cov = dataset._band_stats()                                                      # [n_bands], [n_bands, n_bands]
+    noise_std = proj = None
+    if getattr(args, 'raw_bands', False):
+        # control run: the raw cube bands inside band_range go straight into the model (identity projection, standardised
+        # with the training band statistics, no weight vector) to compare against the EC filter responses
+        R = np.eye(dataset.n_bands, dtype=np.float32)
+        mean, std = mu.astype(np.float32), np.sqrt(np.maximum(np.diag(cov), 0.0)).astype(np.float32)
+        volts, weight_vector = dataset.wavelens.copy(), False                            # 'voltages' = band centres (nm)
+        if noise_db > 0:
+            noise_std = read_noise_std(R, mu, cov, noise_db, noise_model)                # per band, floor over the bands
+    else:
+        R, mean, std, volts = dataset.filter_bank_tensors()
+        weight_vector = (args.session == 'A') and not getattr(args, 'no_gate', False)
+        if noise_db > 0:
+            R_all, _ = dataset.candidate_filter_matrix()                                 # every usable voltage: the floor is the device's
+            noise_std = read_noise_std(R, mu, cov, noise_db, noise_model, R_ref=R_all)
+        k = int(getattr(args, 'pca_channels', 0) or 0)
+        if k > 0:
+            if noise_std is None:
+                R, mean, std, volts = pca_whitened_channels(R, mean, std, cov, k)        # folded form, as the runs before read noise
+            else:
+                # the readings stay explicit so the noise lands on them before the whitening (FilterBank docstring)
+                V, lam = pca_whitening(R, mean, std, cov, k, noise_var=(noise_std / std) ** 2)
+                proj, volts = (V / np.sqrt(lam)).astype(np.float32), np.arange(1, k + 1, dtype=np.float64)
+            weight_vector = False
+    scale_range = None
+    db_range = getattr(args, 'read_noise_db_range', None)
+    if noise_std is not None and db_range:
+        # SNR augmentation: the noise level seen in training varies log-uniformly between the two dB values (as multipliers
+        # of the nominal sigma); the whitening and the evaluation keep the nominal --read_noise_db
+        lo_db, hi_db = sorted(float(v) for v in db_range)
+        scale_range = (10 ** ((noise_db - hi_db) / 20), 10 ** ((noise_db - lo_db) / 20))
+    fb = FilterBank(R, mean, std, weight_vector=weight_vector, noise_std=noise_std, proj=proj, eval_seed=int(getattr(args, 'seed', 0) or 0),
+                    train_scale_range=scale_range)
+    if noise_std is not None:
+        print(f"read noise {noise_db:g} dB ({noise_model}): sigma {noise_std.min():.3g}-{noise_std.max():.3g} per reading"
+              + (f", whitening of {fb.n_readings} readings -> {fb.n_channels} channels regularised by it" if proj is not None else "")
+              + (f", training level drawn from {lo_db:g}-{hi_db:g} dB per batch" if scale_range is not None else ""))
+    return fb, volts
