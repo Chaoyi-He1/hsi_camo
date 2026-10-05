@@ -1,0 +1,37 @@
+SAM2-UNet (vendored)
+
+Source:   https://github.com/WZH0120/SAM2-UNet
+Commit:   01598e5e9912ffb23f965ecbebf4d1dfecbaa56e
+Licence:  Apache License 2.0 (LICENSE in this directory, copied unchanged from the commit above; the upstream file
+          names no copyright holder). Paper: Xiong et al., "SAM2-UNet: Segment Anything 2 Makes Strong Encoder for
+          Natural and Medical Image Segmentation", arXiv 2408.08870.
+
+Files taken: SAM2UNet.py (as sam2unet.py) and the structure_loss function of train.py (appended to sam2unet.py).
+Files NOT taken: the repo's own copy of the `sam2` package (sam2/, sam2_configs/, a Windows _C.pyd and __pycache__).
+It is a second top-level package named `sam2` that would shadow, or be shadowed by, the pip `sam2` package
+(facebookresearch/sam2 @ 2b90b9f5ceec907a1c18123530e92e794ad901a4) that hsi_camo installs; its Hiera trunk is identical
+to the pip one, so sam2unet.py imports the pip package instead. Not taken either: dataset.py, train.py (except
+structure_loss), test.py, eval.py, the shell scripts and the images.
+
+Changes made by hsi_camo (2026-10-04), each marked "# CHANGED (hsi_camo)" in sam2unet.py:
+ 1. The Hiera trunk is built by a new function build_hiera_trunk(model_cfg, checkpoint_path):
+    - it imports `sam2.build_sam.build_sam2` lazily, so the decoder classes import without sam2 installed;
+    - it calls build_sam2(..., device="cpu", mode="eval", apply_postprocessing=False); upstream used the default
+      device="cuda", which raises "No CUDA GPUs are available" on a CPU-only machine (the caller moves the model);
+    - the config name is an argument: "configs/sam2/sam2_hiera_l.yaml" of the pip package (identical trunk to
+      upstream's "sam2_hiera_l.yaml"), or "configs/sam2/sam2_hiera_t.yaml" for the CPU unit tests.
+ 2. SAM2UNet.__init__(trunk) takes the built trunk instead of a checkpoint path, and sizes the four RFB modules from
+    trunk.channel_list[::-1] instead of the hard-coded Hiera-L widths 144/288/576/1152 (equal for Hiera-L).
+    Everything after the trunk (freezing, Adapter wrapping, RFB, Up, side/head convs, forward) is unchanged,
+    including the unused up4.
+ 3. structure_loss: upstream passes reduce='none' to F.binary_cross_entropy_with_logits. The legacy `reduce`
+    argument reads the string as True, i.e. reduction='mean', so upstream's weighted BCE is the plain mean BCE.
+    Here reduction='none' (the weighted BCE the loss is written for); structure_loss(..., legacy_bce=True)
+    reproduces upstream's value.
+ 4. The `if __name__ == "__main__"` CUDA smoke test at the end of SAM2UNet.py is removed.
+
+How hsi_camo uses it (models/seg_models.py, SAM2UNetSeg), deliberate departures from the upstream recipe:
+ - the trunk's 3-channel patch-embed conv is replaced by an (N + 1)-channel stem folded from it
+   (models/seg_stem.fold_stem) and trained at its own learning rate (the rest of the trunk stays frozen);
+ - input 512 x 512 canvases instead of 352; bf16 autocast; gradient clipping 1.0; AdamW weight decay 1e-4 (upstream
+   5e-4), separate no-decay group for biases / norms and the stem, 200 epochs, cosine schedule (hsi_camo spec §7).

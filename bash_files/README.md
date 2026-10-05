@@ -1,6 +1,6 @@
 # bash_files
 
-Operational shell scripts for Stage 1 (kept out of the repo root). All of them `cd` to the repo root themselves, so run
+Operational shell scripts for Stages 1 and 2 (kept out of the repo root). All of them `cd` to the repo root themselves, so run
 them from anywhere: `bash bash_files/<script>.sh`. `PY` (python binary) and the GPU/worker knobs are env-overridable.
 
 | script | what it does |
@@ -15,6 +15,7 @@ them from anywhere: `bash bash_files/<script>.sh`. `PY` (python binary) and the 
 | `launch_sel_followup.sh` | waits for the queue above, then the 24-voltage greedy run (40 dB) and the 10-voltage greedy run without read noise, then `main_det_compare.py` over all five |
 | `launch_sel_clean_queue.sh` | noise-free redo: session-B / uniform / greedy-24 voltage sets without read noise, then `main_det_compare.py` of every noise-free run (incl. PCA-11, raw, sessions A and B) |
 | `copy_cache_to_nvme.sh` | optional: mirror the 181 GB fp16 frame cache to the NVMe `/home` partition (ask first) |
+| `setup_third_party.sh` | Stage 2, once per machine: pinned `sam2` + hydra-core, `pysodmetrics` (no deps, keeps numpy 2.5.2) + scikit-image/learn, einops + timm; ZoomNeXt clone into git-ignored `third_party/zoomnext/` (no licence: research use only); SAM2 v1 / SAM2.1 Hiera-L and ZoomNeXt-B2 checkpoints into `weights/pretrained/`; verifies every checkpoint strict-loads |
 
 Background runs use `python -u` (redirected stdout is block-buffered otherwise) and `setsid nohup`, so they survive the
 launching shell. Only one full-resolution training job fits on the box at a time (see spec §12).
