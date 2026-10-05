@@ -1,7 +1,9 @@
 import os
 import json
+import random
 import numpy as np
 import pytest
+import torch
 from PIL import Image
 
 from data_loader.boxes import expand_box
@@ -9,6 +11,8 @@ from data_loader.cube_cache import build_cube_cache, cache_path, default_cache_d
 from data_loader import roi_crops
 from data_loader.my_dataset import HyperCOD_data
 from data_loader.roi_crops import match_rois, build_crop_cache, frame_windows, pixel_box, inside
+from data_loader.roi_crops import (place_on_canvas, canvas_to_roi, rasterise_box, flip_rot, jitter_gt_box, n_fp_items,
+                                   HyperCOD_roi, seg_collate_fn)
 from tests.conftest import H, W
 
 OBJ1 = [20.0, 10.0, 26.0, 16.0]          # conftest OBJ_SLICE (rows 10:16, cols 20:26), in every frame
@@ -163,3 +167,241 @@ def test_build_crop_cache_with_workers_matches_serial(synthetic_root, tmp_path):
     for w in a['windows']:
         np.testing.assert_array_equal(np.load(out / w['file']), np.load(out2 / w['file']))
         np.testing.assert_array_equal(np.load(out / w['gt_file']), np.load(out2 / w['gt_file']))
+
+
+DS_KW = dict(roi_margin=1.5, roi_min=0, canvas=32)                       # oracle ROIs of the 6 x 6 object are 10 x 10
+
+
+def test_place_on_canvas_exact_and_resized_round_trip():
+    rng = np.random.default_rng(0)
+    crop = rng.random((3, 20, 30)).astype(np.float16)
+    out, valid, (oy, ox), s = place_on_canvas(crop, canvas=64)
+    assert s == 1.0 and (oy, ox) == (22, 17) and out.dtype == np.float16 and valid.sum() == 600
+    np.testing.assert_array_equal(out[:, oy:oy + 20, ox:ox + 30], crop)
+    assert not out[:, ~valid].any()
+    np.testing.assert_array_equal(canvas_to_roi(out[1].astype(np.float32), (oy, ox), s, (20, 30)), crop[1].astype(np.float32))
+    np.testing.assert_array_equal(canvas_to_roi(torch.from_numpy(out[1].astype(np.float32)), (oy, ox), s, (20, 30)),
+                                  crop[1].astype(np.float32))
+    # larger than the canvas: aspect kept, downscaled to fit, round trip within interpolation error on a smooth map
+    yy, xx = np.mgrid[0:100, 0:60]
+    smooth = (0.5 + 0.5 * np.sin(yy / 15.0) * np.cos(xx / 11.0)).astype(np.float32)[None]   # [1, 100, 60]
+    out, valid, (oy, ox), s = place_on_canvas(smooth, canvas=64)
+    assert abs(s - 0.64) < 1e-9 and valid.sum() == 64 * 38 and (oy, ox) == (0, 13)
+    back = canvas_to_roi(out[0], (oy, ox), s, (100, 60))
+    assert back.shape == (100, 60) and np.abs(back - smooth[0])[4:-4, 4:-4].max() < 0.05
+    # scale augmentation never pushes the crop off the canvas
+    out, valid, _, s = place_on_canvas(crop, canvas=64, scale=3.0)
+    assert s == pytest.approx(64 / 30) and valid.sum() == 43 * 64
+
+
+def test_flip_rot_keeps_box_and_arrays_consistent():
+    c = 16
+    box = [3.5, 2.0, 9.0, 6.2]
+    for hf in (False, True):
+        for vf in (False, True):
+            for k in range(4):
+                (m,), b = flip_rot([rasterise_box(box, c)], box, hf, vf, k, c)
+                np.testing.assert_array_equal(m, rasterise_box(b, c))
+
+
+def test_jittered_gt_box_never_cuts_the_object():
+    rng = random.Random(0)
+    gt = [100.0, 50.0, 160.0, 90.0]
+    for _ in range(1000):
+        b = jitter_gt_box(gt, 0.15, rng, 1680, 1240)
+        assert b[0] <= gt[0] and b[1] <= gt[1] and b[2] >= gt[2] and b[3] >= gt[3]
+        assert b[2] - b[0] <= 60 * 1.3 + 1e-3 and b[3] - b[1] <= 40 * 1.3 + 1e-3
+        # the expanded ROI fits the cached object window (grow 2.0, min_side 512)
+        assert inside(pixel_box(expand_box(b, 1.5, 256, 1680, 1240), 1680, 1240),
+                      pixel_box(expand_box(gt, 2.0, 512, 1680, 1240), 1680, 1240))
+    assert n_fp_items(289, 0.1) == 32 and n_fp_items(2, 0.0) == 0
+
+
+def test_validation_items_are_deterministic_and_exact(synthetic_root, tmp_path):
+    root, out, _, _, _ = _crop_cache(synthetic_root, tmp_path)
+    ds = HyperCOD_roi(str(out), 'val', 'raw', train=False, **DS_KW)
+    assert len(ds) == 2                                                    # oracle ROI + the matched raw val ROI
+    ref = HyperCOD_data(str(root), split='train', ids=['10'], use_filter=False, norm='p99', crop_size=0,
+                        filter_norm='none', cache_dir=default_cache_dir(str(root)), out_dtype='float16')
+    frame, gt, _ = ref[0]                                                  # [133, H, W] fp16 p99-scaled, [1, H, W]
+    for i, source in enumerate(['gt', 'det']):
+        img, mask, box_map, valid, meta = ds[i]
+        assert meta['source'] == source and meta['frame'] == '10' and meta['s'] == 1.0
+        x1, y1, x2, y2 = [int(v) for v in meta['roi']]
+        if source == 'gt':
+            assert (x1, y1, x2, y2) == pixel_box(expand_box(OBJ1, 1.5, 0, H, W), H, W) == (18, 8, 28, 18)
+            assert meta['box'] == OBJ1
+        else:
+            assert (x1, y1, x2, y2) == (15, 5, 31, 21) and meta['box'] == [19, 9, 27, 17]
+        oy, ox = meta['offset']
+        h, w = meta['roi_hw']
+        assert (h, w) == (y2 - y1, x2 - x1)
+        assert img.dtype == np.float16 and img.shape == (133, 32, 32) and mask.shape == box_map.shape == valid.shape == (1, 32, 32)
+        np.testing.assert_array_equal(img[:, oy:oy + h, ox:ox + w], frame[:, y1:y2, x1:x2])     # same fp16 p99 values
+        np.testing.assert_array_equal(mask[0, oy:oy + h, ox:ox + w], gt[0, y1:y2, x1:x2])
+        assert meta['obj_area'] == 36 and meta['area'] == 36 and mask.sum() == 36
+        np.testing.assert_array_equal(box_map[0], rasterise_box(meta['box_canvas'], 32))
+        bx1, by1, bx2, by2 = meta['box_canvas']
+        assert (bx1, by1) == (ox + meta['box'][0] - x1, oy + meta['box'][1] - y1)
+        assert valid.sum() == h * w and not img[:, valid[0] == 0].any()
+        img2, mask2, _, _, meta2 = ds[i]
+        assert np.array_equal(img, img2) and np.array_equal(mask, mask2) and meta == meta2
+
+
+def test_training_items_mix_jitter_and_targets(synthetic_root, tmp_path):
+    root, out, _, _, _ = _crop_cache(synthetic_root, tmp_path)
+    ref = HyperCOD_data(str(root), split='train', ids=['3'], use_filter=False, norm='p99', crop_size=0,
+                        filter_norm='none', cache_dir=default_cache_dir(str(root)), out_dtype='float16')
+    full_gt = ref.load_gt('3')
+    # object items only, no augmentation that resizes: check targets and the 5/9 split
+    ds = HyperCOD_roi(str(out), 'train', 'raw', scale_aug=(1.0, 1.0), gain_aug=0.0, seed=0, **DS_KW)
+    assert len(ds) == 2 and ds.n_fp == 0                                   # 2 objects, round(2 x 0.1 / 0.9) = 0 fp
+    counts = {1: {'gt': 0, 'det': 0}, 2: {'gt': 0, 'det': 0}}
+    for _ in range(300):
+        for i in range(2):
+            img, mask, box_map, valid, meta = ds[i]
+            counts[meta['object']][meta['source']] += 1
+            x1, y1, x2, y2 = [int(v) for v in meta['roi']]
+            assert meta['obj_area'] == int(full_gt[y1:y2, x1:x2].sum())
+            assert mask.sum() == meta['obj_area']                          # s = 1: the GT crop, only rotated / flipped
+            np.testing.assert_array_equal(box_map[0], rasterise_box(meta['box_canvas'], 32))
+            assert not mask[valid == 0].any() and not box_map[valid == 0].any()
+            if meta['source'] == 'gt':                                     # jittered GT: object never cut
+                assert meta['obj_area'] == meta['area']
+                ob = OBJ1 if meta['object'] == 1 else OBJ2
+                assert inside(pixel_box(ob, H, W), pixel_box(meta['box'], H, W))
+            else:                                                          # matched raw ROI of object 1
+                assert meta['roi'] == [16, 6, 30, 20] and meta['object'] == 1
+    assert counts[2]['det'] == 0 and counts[2]['gt'] == 300               # no matched raw ROI -> GT fallback
+    assert abs(counts[1]['gt'] / 300 - 5 / 9) < 0.08
+
+
+def test_false_positive_items_and_epoch_size(synthetic_root, tmp_path):
+    root, out, _, _, _ = _crop_cache(synthetic_root, tmp_path)
+    ds = HyperCOD_roi(str(out), 'train', 'ec10', box_mix=(0.25, 0.25, 0.5), seed=1, **DS_KW)
+    assert ds.n_fp == 2 and len(ds) == 4 and len(ds.fp_rois) == 1
+    for _ in range(20):
+        img, mask, box_map, valid, meta = ds[3]
+        assert meta['source'] == 'fp' and meta['object'] == -1 and meta['roi'] == FP_ROI
+        assert not mask.any() and box_map.any() and img.dtype == np.float16
+    assert HyperCOD_roi(str(out), 'train', 'ec24', box_mix=(0.25, 0.25, 0.5), **DS_KW).n_fp == 0   # ec24 has no fp ROI
+    assert len(HyperCOD_roi(str(out), 'val', 'ec10', train=False, **DS_KW)) == 1                  # oracle only
+
+
+def test_rgb_arm_uses_raw_rois(synthetic_root, tmp_path):
+    root, out, _, _, _ = _crop_cache(synthetic_root, tmp_path)
+    a = HyperCOD_roi(str(out), 'val', 'rgb', train=False, **DS_KW)
+    b = HyperCOD_roi(str(out), 'val', 'raw', train=False, **DS_KW)
+    assert len(a) == len(b) == 2 and all(np.array_equal(x, y) for x, y in zip(a[1][:4], b[1][:4]))
+    with pytest.raises(AssertionError, match='grow'):
+        HyperCOD_roi(str(out), 'val', 'raw', train=False, roi_margin=2.0, roi_min=0, canvas=32)
+
+
+def test_missing_window_raises_with_the_frame(synthetic_root, tmp_path):
+    root, out, _, _, _ = _crop_cache(synthetic_root, tmp_path)
+    ds = HyperCOD_roi(str(out), 'val', 'raw', train=False, **DS_KW)
+    w = ds.items[0][0]
+    os.remove(out / w['file'])
+    with pytest.raises(AssertionError, match="frame 10"):                   # spec §9: never skipped
+        ds[0]
+
+
+def test_seg_collate_fn(synthetic_root, tmp_path):
+    root, out, _, _, _ = _crop_cache(synthetic_root, tmp_path)
+    ds = HyperCOD_roi(str(out), 'train', 'raw', seed=0, **DS_KW)
+    loader = torch.utils.data.DataLoader(ds, batch_size=2, shuffle=True, num_workers=0, collate_fn=seg_collate_fn)
+    batch = next(iter(loader))
+    assert batch['img'].dtype == torch.float16 and batch['img'].shape == (2, 133, 32, 32)
+    for k in ('mask', 'box_map', 'valid'):
+        assert batch[k].dtype == torch.float32 and batch[k].shape == (2, 1, 32, 32)
+    assert batch['box_xyxy'].shape == (2, 4) and batch['box_xyxy'].dtype == torch.float32 and len(batch['meta']) == 2
+    for i, m in enumerate(batch['meta']):
+        assert torch.equal(batch['box_xyxy'][i], torch.tensor(m['box_canvas']))
+
+
+def _crop_cache_gt(synthetic_root, tmp_path, gt, min_side, train_gt=None, train_rois=None):
+    '''
+    Crop cache whose val frame '10' has the given GT and no detector ROI in any arm; train frame '3' as in the fixture
+    unless train_gt / train_rois (the raw arm's entry of frame '3', {"rois": [...], "boxes": [...]}) are given.
+    '''
+    root, _, _ = synthetic_root
+    Image.fromarray(np.stack([gt.astype(np.uint8) * 255] * 3, axis=-1)).save(root / 'train' / 'GT' / '10.png')
+    if train_gt is not None:
+        Image.fromarray(np.stack([train_gt.astype(np.uint8) * 255] * 3, axis=-1)).save(root / 'train' / 'GT' / '3.png')
+    build_cube_cache(str(root), 'train', num_workers=0)
+    split_file = tmp_path / 'val.json'
+    split_file.write_text(json.dumps({'seed': 0, 'n_val': 1, 'val_ids': ['10']}))
+    roi_files = {}
+    for arm in ('raw', 'ec10', 'ec24'):
+        for split, frame in (('train', '3'), ('val', '10')):
+            p = tmp_path / f'rois_{arm}_{split}.json'
+            entry = train_rois if (train_rois is not None and arm == 'raw' and split == 'train') else {'rois': [], 'boxes': []}
+            p.write_text(json.dumps({frame: entry}))
+            roi_files.setdefault(arm, {})[split] = str(p)
+    out = tmp_path / 'crops_gt'
+    build_crop_cache(str(root), str(out), roi_files, split_file=str(split_file), grow=2.0, min_side=min_side, min_area=10,
+                     num_workers=0)
+    return out
+
+
+def test_roi_with_two_objects_and_a_frame_corner_roi(synthetic_root, tmp_path):
+    gt = np.zeros((H, W), dtype=bool)
+    gt[10:16, 20:26] = True          # A, 36 px
+    gt[18:24, 22:30] = True          # B, 48 px: inside A's 24 px oracle ROI, and A inside B's
+    gt[42:48, 0:6] = True            # C, 36 px, in the bottom-left corner of the frame
+    out = _crop_cache_gt(synthetic_root, tmp_path, gt, min_side=24)
+    ds = HyperCOD_roi(str(out), 'val', 'raw', train=False, roi_margin=1.5, roi_min=24, canvas=32)
+    items = [ds[i] for i in range(len(ds))]
+    assert len(items) == 3 and all(m['source'] == 'gt' for *_, m in items)
+    by_area = {}
+    for img, mask, box_map, valid, meta in items:
+        x1, y1, x2, y2 = [int(v) for v in meta['roi']]
+        assert 0 <= x1 < x2 <= W and 0 <= y1 < y2 <= H
+        # target = every GT pixel inside the ROI (the union), size bucket = the object's own area
+        assert mask.sum() == meta['obj_area'] == int(gt[y1:y2, x1:x2].sum())
+        by_area.setdefault(meta['area'], []).append(meta['obj_area'])
+        assert not mask[valid == 0].any() and not box_map[valid == 0].any() and not img[:, valid[0] == 0].any()
+        np.testing.assert_array_equal(box_map[0], rasterise_box(meta['box_canvas'], 32))
+    assert sorted(by_area) == [36, 48] and sorted(by_area[36]) == [36, 84] and by_area[48] == [84]
+    corner = next(m for *_, m in items if m['obj_area'] == 36)
+    # clipped at the frame edge (expand_box does not shift), so smaller than roi_min and zero-padded on the canvas
+    assert corner['roi'][0] == 0 and corner['roi'][3] == H and corner['roi_hw'] == (15, 15) and corner['s'] == 1.0
+
+
+def test_training_items_through_dataloader_workers(synthetic_root, tmp_path):
+    '''
+    Review Focus (with Task 3's test_build_crop_cache_with_workers_matches_serial): training items through DataLoader
+    workers are always valid, and the seeded per-worker augmentation is not frozen across workers / epochs.
+    '''
+    root, out, _, _, _ = _crop_cache(synthetic_root, tmp_path)
+    ds = HyperCOD_roi(str(out), 'train', 'raw', seed=0, roi_margin=1.5, roi_min=0, canvas=32)
+    loader = torch.utils.data.DataLoader(ds, batch_size=1, shuffle=False, num_workers=2, collate_fn=seg_collate_fn)
+    seen = []
+    for _ in range(10):
+        for batch in loader:
+            m = batch['meta'][0]
+            assert batch['img'].shape == (1, 133, 32, 32) and not batch['mask'][batch['valid'] == 0].any()
+            seen.append(tuple(m['aug']) + (m['source'], m['object']))
+    assert len(seen) == 10 * len(ds) and len(set(seen)) > 2
+
+
+def test_false_positive_item_target_is_empty_even_when_it_overlaps_an_object(synthetic_root, tmp_path):
+    '''
+    Controller note (Task 3): an fp window may list GT objects below min_cover (here 1 of 120 px = 0.8 % < 1 %).
+    The window's GT crop then has a foreground pixel, but spec §3 says a false-positive box has an EMPTY target.
+    '''
+    gt = np.zeros((H, W), dtype=bool)
+    gt[10:22, 20:30] = True                                                # 12 x 10 = 120 px
+    fp = [29.0, 21.0, 38.0, 30.0]                                          # covers only the pixel (row 21, col 29)
+    train_rois = {'rois': [fp + [0.4]], 'boxes': [[31, 23, 36, 28, 0.4]]}
+    out = _crop_cache_gt(synthetic_root, tmp_path, gt, min_side=8, train_gt=gt, train_rois=train_rois)
+    ds = HyperCOD_roi(str(out), 'train', 'raw', box_mix=(0.25, 0.25, 0.5), seed=0, roi_margin=1.5, roi_min=0, canvas=32)
+    assert len(ds.obj_windows) == 1 and ds.n_fp == 1 and len(ds) == 2 and len(ds.fp_rois) == 1
+    w, e = ds.fp_rois[0]
+    assert [o['id'] for o in w['objects']] == [1]                          # the overlapped object is listed ...
+    assert np.load(out / w['gt_file']).sum() == 1                          # ... and its pixel is in the window's GT crop
+    for _ in range(20):
+        img, mask, box_map, valid, meta = ds[1]
+        assert meta['source'] == 'fp' and meta['object'] == -1 and meta['roi'] == fp
+        assert not mask.any() and meta['obj_area'] == 0 and meta['area'] == 0     # ... but the target stays empty
+        assert box_map.any() and not box_map[valid == 0].any()
