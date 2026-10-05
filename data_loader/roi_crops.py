@@ -184,7 +184,10 @@ def build_crop_cache(data_path, out_dir, roi_files, splits=('train', 'val'), gro
     Writes <out_dir>/<id>_<k>.npy, <out_dir>/<id>_<k>_gt.npy and, last and atomically, <out_dir>/index.json =
       {"band_range", "frame_hw", "grow", "min_side", "min_area", "min_cover", "arms", "roi_files",
        "windows": [{"file", "gt_file", "frame", "split", "kind", "window", "scale", "object", "objects", "rois"}]}
-    so a crashed build leaves no index.json and is rebuilt. Returns {"n_windows", "bytes", "n_object", "n_fp"}.
+    index.json exists only after a complete build: a rebuild into an existing out_dir first removes the old
+    index.json (and a stale index.json.tmp), so a crashed build leaves no index.json and is rebuilt. The old window
+    files are not deleted: the new build overwrites those it reuses and the rest stay unreferenced.
+    Returns {"n_windows", "bytes", "n_object", "n_fp"}.
     '''
     arms = [a for a in ARMS if a in roi_files]
     assert arms and set(roi_files) <= set(ARMS), f"roi_files arms must be in {ARMS}, got {list(roi_files)}"
@@ -193,6 +196,9 @@ def build_crop_cache(data_path, out_dir, roi_files, splits=('train', 'val'), gro
     cache_dir = cache_dir if cache_dir else default_cache_dir(data_path)
     train_ids, val_ids = load_det_ids(data_path, split_file)
     os.makedirs(out_dir, exist_ok=True)
+    for stale in (INDEX_NAME, INDEX_NAME + '.tmp'):                   # an index of an earlier build would point at windows about to be overwritten
+        if os.path.exists(os.path.join(out_dir, stale)):
+            os.remove(os.path.join(out_dir, stale))
     windows, frame_hw = [], None
     for split in splits:
         assert split in ('train', 'val'), f"split must be 'train' or 'val', got {split!r}"

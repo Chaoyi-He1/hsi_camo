@@ -6,6 +6,7 @@ from PIL import Image
 
 from data_loader.boxes import expand_box
 from data_loader.cube_cache import build_cube_cache, cache_path, default_cache_dir
+from data_loader import roi_crops
 from data_loader.my_dataset import HyperCOD_data
 from data_loader.roi_crops import match_rois, build_crop_cache, frame_windows, pixel_box, inside
 from tests.conftest import H, W
@@ -124,6 +125,31 @@ def test_build_crop_cache_raises_on_missing_frame(synthetic_root, tmp_path):
     roi_files['raw']['val'] = str(bad)
     with pytest.raises(AssertionError, match='lacks frames'):
         build_crop_cache(str(root), str(tmp_path / 'crops2'), roi_files, split_file=str(split_file), **KW)
+
+
+def test_rebuild_into_existing_out_dir_never_leaves_a_stale_index(synthetic_root, tmp_path, monkeypatch):
+    root, out, roi_files, split_file, stats = _crop_cache(synthetic_root, tmp_path)       # first, complete build
+    old = (out / 'index.json').read_text()
+    (out / 'index.json.tmp').write_text('{"half-written')                                 # debris of an earlier crash
+    reads = []
+    real_read = roi_crops.read_npy_direct
+
+    def crash_on_second_frame(path):
+        reads.append(path)
+        if len(reads) == 2:
+            raise RuntimeError('simulated crash while reading the second frame')
+        return real_read(path)
+
+    monkeypatch.setattr(roi_crops, 'read_npy_direct', crash_on_second_frame)              # num_workers=0: same process
+    with pytest.raises(RuntimeError, match='simulated crash'):
+        build_crop_cache(str(root), str(out), roi_files, split_file=str(split_file), **{**KW, 'grow': 3.0})
+    assert len(reads) == 2
+    assert not (out / 'index.json').exists() and not (out / 'index.json.tmp').exists()   # nothing claims a complete cache
+    monkeypatch.setattr(roi_crops, 'read_npy_direct', real_read)                          # relaunch: the rebuild succeeds
+    stats2 = build_crop_cache(str(root), str(out), roi_files, split_file=str(split_file), **{**KW, 'grow': 3.0})
+    new = (out / 'index.json').read_text()
+    assert json.loads(new)['grow'] == 3.0 and new != old and stats2['n_windows'] == 4
+    assert not (out / 'index.json.tmp').exists()
 
 
 def test_build_crop_cache_with_workers_matches_serial(synthetic_root, tmp_path):
