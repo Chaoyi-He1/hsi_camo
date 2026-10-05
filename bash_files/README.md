@@ -8,7 +8,7 @@ them from anywhere: `bash bash_files/<script>.sh`. `PY` (python binary) and the 
 | `make_env.sh` | creates the `hsi_camo` conda env (torch 2.11 + cu128, ultralytics, wandb, ...) |
 | `launch_det_A.sh` | session A: all 344 voltages + weight vector, 100 epochs, detached; log `logs/det_A.log` |
 | `launch_det_B.sh` | session B: top-10 voltages from A (`A_CKPT`, `A_RANK` overridable), detached; log `logs/det_B.log` |
-| `launch_rois.sh` | Stage-2 ROI export for test and train from `B_CKPT` (default `weights/det_B/model_best`) |
+| `launch_rois_all.sh` | Stage-2 ROI export: `raw133_A`, `sel10g_clean_A`, `sel24g_clean_A` (rebuilt from their checkpoint args) on train / val / test, sequential on GPU 0, detached; `results/det/rois_<run>_<split>.json`, existing files skipped (`FORCE=1` redoes) |
 | `launch_raw133.sh` | control run: raw 133 bands (400-800 nm) into YOLO, no filter, no gate (GPU 1 by default) |
 | `launch_pca11.sh` | filter model on the K PCA-whitened response directions (default K=11), no gate; `UNIFORM=12` for a uniform-voltage control |
 | `launch_sel10_queue.sh` | three fixed-10-voltage runs in sequence (greedy / session-B / uniform voltages, 40 dB read noise, whitened), then `main_det_compare.py` on their fixed checkpoints |
