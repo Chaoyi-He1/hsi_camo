@@ -412,8 +412,20 @@ class HyperCOD_roi(Dataset.Dataset):
             index = json.load(f)
         assert self.roi_arm in index['arms'], f"crop cache {cache_dir} has no ROIs of arm {self.roi_arm!r} (has {index['arms']})"
         # the cached object windows were grown so that every jittered expanded GT ROI fits (spec §3: x 2.0 >= x 1.5 x 1.3)
-        assert roi_margin * (1 + 2 * gt_jitter) <= index['grow'] + 1e-9 and roi_min <= index['min_side'], \
-            f"roi_margin {roi_margin} x (1 + 2 x {gt_jitter}) / roi_min {roi_min} exceed the cache's grow {index['grow']} / min_side {index['min_side']}"
+        assert roi_margin * (1 + 2 * gt_jitter) <= index['grow'] + 1e-9, \
+            f"roi_margin {roi_margin} x (1 + 2 x gt_jitter {gt_jitter}) exceeds the cache's grow {index['grow']}"
+        # The window is centred on the UNjittered GT box (side max(grow x side, min_side)); the jittered box's centre moves by
+        # up to gt_jitter x side / 2. Where the roi_min floor sets the ROI side, the ROI's far edge is at most
+        # gt_jitter x side / 2 + roi_min / 2 from the window centre, the window's at max(grow x side, min_side) / 2:
+        # j x side + roi_min <= max(grow x side, min_side), tightest at side = min_side / grow -> roi_min <= min_side x (1 - j / grow).
+        # (The margin-set case is the roi_margin check above.) Minus 1 px for pixel_box's floor / ceil and float32 rounding.
+        # Validation boxes are not jittered: the oracle ROI is concentric with its window, so roi_min <= min_side suffices.
+        if train:
+            max_roi_min = index['min_side'] * (1 - gt_jitter / index['grow']) - 1
+            bound = f"min_side {index['min_side']} x (1 - gt_jitter {gt_jitter} / grow {index['grow']}) - 1 px"
+        else:
+            max_roi_min, bound = index['min_side'], f"min_side {index['min_side']}"
+        assert roi_min <= max_roi_min, f"roi_min {roi_min} exceeds {max_roi_min:g} = the cache's {bound}: the ROI would overrun its window"
         self.H, self.W = index['frame_hw']
         self.windows = [w for w in index['windows'] if w['split'] == split]
         self.obj_windows = [w for w in self.windows if w['kind'] == 'object']
@@ -477,8 +489,12 @@ class HyperCOD_roi(Dataset.Dataset):
         roi = pixel_box(roi_f, self.H, self.W)
         bpx = pixel_box(box, self.H, self.W)
         if source == 'gt':
-            # the window was grown for the jittered ROI (asserted in __init__); clip only absorbs float rounding
-            roi = (max(roi[0], wx1), max(roi[1], wy1), min(roi[2], wx2), min(roi[3], wy2))
+            # the window was grown for the jittered ROI (asserted in __init__); the clip only absorbs float rounding, so a
+            # side that moves by more than 1 px is a geometry error and raises (spec §9: every ROI lies inside its window)
+            clipped = (max(roi[0], wx1), max(roi[1], wy1), min(roi[2], wx2), min(roi[3], wy2))
+            assert max(abs(a - b) for a, b in zip(roi, clipped)) <= 1, \
+                f"frame {w['frame']} ({w['file']}): jittered ROI {roi} overruns window {w['window']} by more than 1 px"
+            roi = clipped
         assert inside(roi, w['window']) and inside(bpx, roi), \
             f"frame {w['frame']} ({w['file']}): ROI {roi} / box {bpx} outside window {w['window']}"
         x1, y1, x2, y2 = roi

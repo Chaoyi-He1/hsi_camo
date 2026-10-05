@@ -405,3 +405,67 @@ def test_false_positive_item_target_is_empty_even_when_it_overlaps_an_object(syn
         assert meta['source'] == 'fp' and meta['object'] == -1 and meta['roi'] == fp
         assert not mask.any() and meta['obj_area'] == 0 and meta['area'] == 0     # ... but the target stays empty
         assert box_map.any() and not box_map[valid == 0].any()
+
+
+def _cache_16px_object(synthetic_root, tmp_path, min_side):
+    '''
+    A 16 x 16 object (rows 16:32, cols 12:28) in train frame '3' and val frame '10', cached with grow 2.0 and min_side.
+    16 = 32 / 2: the object side where the window floor (min_side 32) stops binding, so a jittered ROI sits closest to the
+    window edge here (the worst case of the roi_min bound).
+    '''
+    gt = np.zeros((H, W), dtype=bool)
+    gt[16:32, 12:28] = True
+    return _crop_cache_gt(synthetic_root, tmp_path, gt, min_side=min_side, train_gt=gt)
+
+
+def _max_roi_shift(ds, n):
+    '''Largest move (px) of any ROI side by the in-item clip to the window, over n training draws of item 0.'''
+    worst = 0
+    for _ in range(n):
+        img, mask, box_map, valid, meta = ds[0]
+        free = pixel_box(expand_box(meta['box'], ds.roi_margin, ds.roi_min, ds.H, ds.W), ds.H, ds.W)   # ROI before the clip
+        worst = max(worst, max(abs(a - b) for a, b in zip(free, meta['roi'])))
+    return worst
+
+
+def test_roi_min_guard_is_the_exact_bound_of_the_jittered_roi(synthetic_root, tmp_path):
+    out = _cache_16px_object(synthetic_root, tmp_path, min_side=32)
+    # training: roi_min <= min_side x (1 - gt_jitter / grow) - 1 px = 32 x 0.925 - 1 = 28.6
+    for roi_min in (32, 29):               # 32 = the old guard's limit (roi_min == min_side): the jittered ROIs overrun the window
+        with pytest.raises(AssertionError, match='roi_min'):
+            HyperCOD_roi(str(out), 'train', 'raw', roi_min=roi_min, canvas=32)
+    HyperCOD_roi(str(out), 'train', 'raw', roi_min=28, canvas=32)
+    # validation boxes are not jittered: the oracle ROI is concentric with its window, so roi_min == min_side fits
+    HyperCOD_roi(str(out), 'val', 'raw', train=False, roi_min=32, canvas=32)
+    with pytest.raises(AssertionError, match='roi_min'):
+        HyperCOD_roi(str(out), 'val', 'raw', train=False, roi_min=33, canvas=32)
+
+
+def test_default_geometry_constructs_and_never_clips_the_roi(synthetic_root, tmp_path):
+    out = _cache_16px_object(synthetic_root, tmp_path, min_side=512)       # the real cache geometry: grow 2.0, min_side 512
+    ds = HyperCOD_roi(str(out), 'train', 'raw')                            # defaults: roi_margin 1.5, roi_min 256, gt_jitter 0.15
+    assert ds.roi_min == 256 and ds.canvas == 512 and len(ds.obj_windows) == 1
+    assert _max_roi_shift(HyperCOD_roi(str(out), 'train', 'raw', canvas=64, seed=0), 500) <= 1
+
+
+def test_roi_just_inside_the_bound_is_never_clipped(synthetic_root, tmp_path):
+    out = _cache_16px_object(synthetic_root, tmp_path, min_side=32)
+    # 28 <= 28.6: the window holds every jittered ROI of the 16 px object (the worst case of the bound) to the pixel
+    ds = HyperCOD_roi(str(out), 'train', 'raw', roi_min=28, canvas=32, seed=0)
+    assert _max_roi_shift(ds, 500) <= 1
+
+
+def test_item_asserts_when_the_jittered_roi_overruns_its_window(synthetic_root, tmp_path):
+    out = _cache_16px_object(synthetic_root, tmp_path, min_side=32)
+    ds = HyperCOD_roi(str(out), 'train', 'raw', roi_min=28, canvas=32, seed=0)
+    ds.roi_min = 32                                    # bypass the __init__ guard: the item itself must still refuse to clip silently
+    errors = []
+    for _ in range(500):
+        try:
+            ds[0]
+        except AssertionError as err:
+            errors.append(str(err))
+    # the box centre moves up to 0.15 x 16 / 2 = 1.2 px, so the ROI overruns by 2 px in ~5 % of the draws and by <= 1 px
+    # (float rounding, absorbed by the clip) in the rest
+    assert 0 < len(errors) < 500
+    assert all('frame 3' in m and '3_0.npy' in m and 'window' in m for m in errors)
