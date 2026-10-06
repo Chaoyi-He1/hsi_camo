@@ -102,6 +102,7 @@ These are deliberate and are recorded here so that the spec does not have to be 
 - **Tests.** Spec §10 "`test_read_noise.py` extended": the noise branches (floor, relative, whitening with noise and SNR range) are covered by the parametrised cases added to `tests/test_filter_bank.py`; `test_read_noise.py` is unchanged and green through the re-export. Model tests are split over `test_seg_models.py`, `test_seg_sam2box.py`, `test_seg_zoomnext.py`.
 - **NaN in results files.** `results_<name>.txt` and the eval JSONs can hold `NaN` (`fp_false_mask_rate` without fp items, empty size buckets): Python's json reads it back, strict JSON parsers do not.
 - **Test frames are read more than once.** The spec says each test frame is read once in total; `main_seg_eval.py` reads them `ceil(n_runs / runs_per_pass)` times (5 passes for the full 29-run queue at the default `--runs_per_pass 6`, about 12 min of extra reading at about 3 min per pass), because a pass keeps its models on the GPU. `--runs_per_pass` >= n_runs restores a single read, at the price of the GPU memory of all models at once.
+- **Queue: batch size and EVAL_LAST (controller rulings S2, C9).** `bash_files/launch_seg_queue.sh` passes no `--batch_size` / `--accumulate`: `cfg/seg.yaml` `models.*` is the single source of batch size and accumulation (sam2unet / sam2box 8 x 1, zoomnext 4 x 2), so the Task 14 Step 3 listing (`bs=8 acc=1`, the zoomnext `bs=4; acc=2` line, the two flags) and the Step 9 dry-run flags in this plan show the pre-ruling script. `EVAL_LAST` defaults to 1: `model_last` is also evaluated into `results/seg_last` (log `logs/seg_eval_last.log`) unless `EVAL_LAST=` (empty) disables it.
 - **Out of scope (follow-ups):** LoRA (r = 8) on Hiera stages 3–4 for SAM2-UNet (spec §11 ablation), held-out-fold detector boxes, noisy repeats.
 
 ### Task 1: Shared front-end builder `build_filter_bank` (refactor out of `build_ec_yolo`)
@@ -6661,7 +6662,7 @@ Pre-flight outcomes of Task 14, run on 2026-10-05 from the worktree on GPU 0 (2x
 
 **Pre-flight 1, dependencies.** `import sam2, py_sod_metrics, einops, numpy, torch` prints `2.5.2 2.11.0+cu128`. `weights/pretrained/` holds `sam2_hiera_large.pt` (897,952,466 B), `sam2.1_hiera_large.pt` (898,083,611 B), `pvtv2-b2-zoomnext.pth` (113,020,474 B) and the Stage-1 `yolo26s.pt`.
 
-**Pre-flight 2, ROI exports** (`bash bash_files/launch_rois_all.sh`, 07:14-07:32 CDT, 17.7 min, all exports exit 0). Frame counts as expected (251 / 28 / 70) for every detector. The coverage printed by each export is `ROI coverage recall@0.99` (the fraction of GT objects whose box is covered by some exported ROI at 0.99):
+**Pre-flight 2, ROI exports** (`bash bash_files/launch_rois_all.sh`, 19:14-19:32 CDT, 17.7 min, all exports exit 0). Frame counts as expected (251 / 28 / 70) for every detector. The coverage printed by each export is `ROI coverage recall@0.99` (the fraction of GT objects whose box is covered by some exported ROI at 0.99):
 
 | detector (arm) | train (251 frames, 258 objects) | val (28 frames, 31 objects) | test (70 frames, 71 objects) |
 |---|---|---|---|
@@ -6669,7 +6670,7 @@ Pre-flight outcomes of Task 14, run on 2026-10-05 from the worktree on GPU 0 (2x
 | sel10g_clean_A (ec10) | 0.926 | 0.806 | 0.817 |
 | sel24g_clean_A (ec24) | 0.845 | 0.806 | 0.746 |
 
-**Pre-flight 3, crop cache** (`CACHE_ONLY=1 bash bash_files/launch_seg_queue.sh`, 07:32:46-07:37:44 CDT, 5.0 min). `crop cache: 521 windows, 31.4 GB -> /data2/chaoyi/HyperCOD/Raw data/crop_cache_seg` (289 object windows + 232 false-positive windows; `du -sh` 30G = 29.2 GiB, which agrees). In the 25-50 GB band of spec §3. `free -g` after the build: total 125, used 5, free 15, buff/cache 105, **available 119** GB. The cache (31.4 GB) fits in the page cache with a wide margin (119 - 10 > 31.4), so the one-job-per-box rule of spec §7 is enough.
+**Pre-flight 3, crop cache** (`CACHE_ONLY=1 bash bash_files/launch_seg_queue.sh`, 19:32:46-19:37:44 CDT, 5.0 min). `crop cache: 521 windows, 31.4 GB -> /data2/chaoyi/HyperCOD/Raw data/crop_cache_seg` (289 object windows + 232 false-positive windows; `du -sh` 30G = 29.2 GiB, which agrees). In the 25-50 GB band of spec §3. `free -g` after the build: total 125, used 5, free 15, buff/cache 105, **available 119** GB. The cache (31.4 GB) fits in the page cache with a wide margin (119 - 10 > 31.4), so the one-job-per-box rule of spec §7 is enough.
 
 **Pre-flight 4, dry runs** (flags `--batch_size` / `--accumulate` omitted: the values come from `cfg/seg.yaml models.*`; each exits 0, filter bank checked against the detector checkpoint, one batch from each of gt / det / fp, GPU 0 was otherwise idle):
 
@@ -6693,5 +6694,15 @@ All are below the 19 GiB budget, so no ZoomNeXt fallback was needed (`cfg/seg.ya
 | `smoke_seg_zoomnext`: zoomnext / ec24 | 71 (batch 4 x accumulate 2) | 48 s (0.672 s/it) | 8 s (67) | 56 s | 9,279 MiB | S 0.876, Fw 0.784, IoU 0.750 |
 
 All three exit 0; each `results_<name>.txt` ends with a `"final": true` line, and `model_best` / `model_last` exist (0.90 GB for sam2unet, 0.96 GB for sam2box, 0.34 GB for zoomnext). `main_seg_eval.py --runs smoke_seg --limit 3 --n_boot 10 --out_dir results/seg_smoke` (15 s) loaded `model_best` without any missing / unexpected key message and wrote the four files under `results/seg_smoke/smoke_seg/` (roi_oracle S 0.778, full_det S 0.652 after one epoch; the numbers mean nothing yet).
+
+Evaluation smoke of the other two models (fix round 2; `CUDA_VISIBLE_DEVICES=1 main_seg_eval.py --runs smoke_seg_sam2box smoke_seg_zoomnext --limit 3 --n_boot 10 --out_dir results/seg_smoke`, log `logs/preflight_eval_smoke2.log`, GPU 1 only because GPU 0 was busy with the RGB baseline): exit 0, both `model_best` loaded with no missing / unexpected key message (the front ends `raw` 133 and `ec24` 24 channels rebuilt from their detector checkpoints), four files each under `results/seg_smoke/<run>/`. One frame pass of 3 frames, 14 s for both models.
+
+| run | roi_oracle S / Fw / IoU | full_det S / Fw / IoU |
+|---|---|---|
+| `smoke_seg` sam2unet / ec10 (earlier, GPU 0) | 0.778 / 0.482 / 0.681 | 0.652 / 0.248 / 0.356 |
+| `smoke_seg_sam2box` sam2box / raw | 0.780 / 0.671 / 0.562 | 0.747 / 0.522 / 0.424 |
+| `smoke_seg_zoomnext` zoomnext / ec24 | 0.849 / 0.815 / 0.723 | 0.889 / 0.807 / 0.713 |
+
+(3 test frames after one epoch: a path check, not a comparison.)
 
 **Time projections.** Per-epoch time = train epoch + val, from the iteration times above (every epoch evaluates the val split; the worker pools are re-created each epoch, no `persistent_workers`, so the first-batch cost of each epoch of about 5-10 s is paid again every epoch and is included): sam2unet 50.2 s, sam2box 43.5 s, zoomnext 55.5 s. 200 epochs: **sam2unet 2.8 h, sam2box 2.4 h, zoomnext 3.1 h per run**. The 28-run queue: 10 sam2unet (9 + the rgb control) x 2.8 h + 9 sam2box x 2.4 h + 9 zoomnext x 3.1 h = **about 77 h (3.2 days)** of training, plus about 1 h for `results/seg` and another about 1 h for the default `EVAL_LAST` pass into `results/seg_last`. This is 2-3x the spec §7 estimate of about 1 h per run. An optimistic lower bound with the first-batch cost hidden (steady-state `time` of the last log window x iterations + val without its first batch) is 35 / 32 / 36 s per epoch = 1.9 / 1.8 / 2.0 h per run, about 53 h for the queue. Data loading is a large share of the step (`data` / `time` per iteration at the end of the epoch: sam2unet 0.38 / 0.79 s, sam2box 0.33 / 0.80 s, zoomnext 0.11 / 0.42 s); the queue passes `--num_workers 6` where the smoke runs used 4, so the real epoch time may land between the two projections. Next: the Step 12 queue launch (not done yet).
