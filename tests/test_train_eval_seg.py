@@ -126,6 +126,14 @@ def test_paste_back_round_trips_merges_by_maximum_and_rejects_bad_geometry():
     np.testing.assert_array_equal(out3[1:10, 2:9], frac[0])
     with pytest.raises(AssertionError):                                            # roi_hw from another rounding rule
         paste_back(canv[0], {**meta, 'roi_hw': (6, 6)}, out)
+    # roi_hw must be exactly (ceil(y2) - floor(y1), ceil(x2) - floor(x1)): 1 px off in either axis raises
+    for bad in ((11, 6), (10, 7), (9, 6), (10, 5)):
+        with pytest.raises(AssertionError, match='roi_hw'):
+            paste_back(canv[0], {**meta, 'roi_hw': bad}, out)
+    for bad in ((8, 7), (9, 6)):                                                   # the fractional ROI above needs (9, 7)
+        with pytest.raises(AssertionError, match='roi_hw'):
+            paste_back(canv3[0], {'frame': '3', 'roi': [2.5, 1.5, 8.5, 9.5], 'offset': off3, 's': s3, 'roi_hw': bad},
+                       np.zeros((20, 15), np.float32))
     with pytest.raises(AssertionError):                                            # ROI leaves the frame
         paste_back(canv[0], {**meta, 'roi': [10.0, 12.0, 16.0, 22.0]}, out)
 

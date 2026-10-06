@@ -151,9 +151,11 @@ def paste_back(prob_canvas, meta, out):
     Paste one ROI prediction into a full-frame probability map, merging overlaps by maximum (spec §5.5).
       prob_canvas [c, c] probability on the canvas (np or tensor), meta the item's meta dict (offset, s, roi_hw, roi),
       out [H, W] float32 frame map (np.zeros((1680, 1240), np.float32) for a fresh frame), modified in place and returned.
-    The ROI's crop starts at (floor(y1), floor(x1)) of meta['roi'] (frame px) and is roi_hw = (h, w) pixels, i.e. the
-    floor / ceil rounding of the fractional export ROI (the rule of box_metrics.mask_coverage); a roi_hw inconsistent
-    with that rounding means the crop came from another rule and raises instead of pasting at a shifted place.
+    The ROI's crop starts at (floor(y1), floor(x1)) of meta['roi'] (frame px) and is roi_hw = (h, w) pixels, exactly
+    (ceil(y2) - floor(y1), ceil(x2) - floor(x1)): the floor / ceil rounding of the export ROI (the rule of
+    box_metrics.mask_coverage and data_loader.roi_crops.pixel_box; both producers, HyperCOD_roi and main_seg_eval.make_item,
+    already store the integral pixel box). Any other roi_hw means the crop came from another rule and raises instead of
+    pasting at a shifted place.
     '''
     if torch.is_tensor(prob_canvas):
         prob_canvas = prob_canvas.detach().float().cpu().numpy()
@@ -161,9 +163,9 @@ def paste_back(prob_canvas, meta, out):
     h, w = int(meta['roi_hw'][0]), int(meta['roi_hw'][1])
     x1, y1, x2, y2 = [float(v) for v in meta['roi']]
     x0, y0 = int(math.floor(x1)), int(math.floor(y1))
-    # floor / ceil rounding makes the integer size exceed the float size by less than 2 px, never fall short of it
-    assert -1e-3 <= w - (x2 - x1) < 2 and -1e-3 <= h - (y2 - y1) < 2, \
-        f"frame {meta.get('frame')}: roi_hw {(h, w)} does not match roi {meta['roi']} (floor x1/y1, ceil x2/y2)"
+    want = (int(math.ceil(y2)) - y0, int(math.ceil(x2)) - x0)
+    assert (h, w) == want, \
+        f"frame {meta.get('frame')}: roi_hw {(h, w)} does not match roi {meta['roi']}: floor x1/y1, ceil x2/y2 give {want}"
     assert x0 >= 0 and y0 >= 0 and y0 + h <= out.shape[0] and x0 + w <= out.shape[1], \
         f"frame {meta.get('frame')}: roi {meta['roi']} with size {(h, w)} leaves the {out.shape} frame"
     p = canvas_to_roi(prob_canvas, meta['offset'], meta['s'], (h, w))                     # [h, w] float32
