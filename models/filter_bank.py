@@ -194,6 +194,40 @@ def read_noise_std(R, mu, cov, snr_db, model='floor', R_ref=None):
     raise ValueError(f"unknown read-noise model '{model}', expected floor | relative")
 
 
+def assert_rgb_compatible(args):
+    '''
+    The Stage-1 RGB baseline (--rgb_images) is a plain camera input: the dataset's 3-channel frame through an identity front
+    end, no gate, no read noise, no whitening, and no session-B slicing (nothing to rank). Asserts that no flag asks for
+    more, with the CLI spelling in the message; a no-op without rgb_images. main_det.main calls it before anything is built
+    and build_filter_bank again, so a checkpoint rebuilt by Stage 2 or main_det_compare is held to the same rule.
+    '''
+    if not getattr(args, 'rgb_images', False):
+        return
+    assert not getattr(args, 'raw_bands', False), "--rgb_images (the RGB camera baseline) cannot be combined with --raw-bands (the cube's bands)"
+    k = int(getattr(args, 'pca_channels', 0) or 0)
+    assert k == 0, f"--rgb_images has no EC responses to whiten, it cannot be combined with --pca-channels {k}"
+    noise_db = float(getattr(args, 'read_noise_db', 0.0) or 0.0)
+    assert noise_db == 0.0, f"--rgb_images is the noise-free camera baseline, it cannot be combined with --read_noise_db {noise_db:g}"
+    assert args.session == 'A', "--rgb_images has no gate to rank and no channels to slice, it cannot be combined with session B (--session A)"
+
+
+def rgb_filter_bank(args, dataset):
+    '''
+    The RGB baseline's front end: the dataset's own camera frame (HyperCOD_data(rgb_images=True), uint8 / 255) through an
+    identity FilterBank (R = I_3, no weight vector, no read noise, no whitening) that standardises each of R, G, B with the
+    train RGB statistics (dataset._rgb_stats, band_stats.compute_rgb_stats): mean = mu, std = sqrt(diag(cov)). The first conv
+    of the YOLO then sees 3 channels, so its init is the exact COCO RGB kernel (ec_yolo.adapt_first_conv_weight with N = 3).
+    Returns (fb, volts) like build_filter_bank, volts = [0, 1, 2] (the channel index: R, G, B).
+    '''
+    assert_rgb_compatible(args)
+    mu, cov = dataset._rgb_stats()                                                       # [3], [3, 3] float64
+    mean, std = mu.astype(np.float32), np.sqrt(np.maximum(np.diag(cov), 0.0)).astype(np.float32)
+    fb = FilterBank(np.eye(3, dtype=np.float32), mean, std, weight_vector=False, eval_seed=int(getattr(args, 'seed', 0) or 0))
+    print(f"RGB baseline: identity front end over the 3 camera channels, mean {[round(float(v), 3) for v in mean]}, "
+          f"std {[round(float(v), 3) for v in std]} (of /255 values), no gate, no read noise")
+    return fb, np.arange(3, dtype=np.float64)
+
+
 def build_filter_bank(args, dataset):
     '''
     The input front end of a detector arm, factored out of models.ec_yolo.build_ec_yolo so that Stage 1 (the detector)
@@ -201,6 +235,7 @@ def build_filter_bank(args, dataset):
       args     the detector's flags (main_det.get_args_parser(), or a checkpoint's ckpt['args']). Every flag except
                `session` is read through getattr with its Stage-1 default, so older checkpoints (raw133_A has no
                pca_channels / read_noise_* / no_gate) and the tests' sparse namespaces keep working:
+                 rgb_images           the RGB camera baseline, see rgb_filter_bank (excludes everything below)
                  raw_bands            identity over the cube bands, standardised with the training band statistics
                  (otherwise)          the dataset's selected EC responses (filter_select / filter_voltages / num_filters);
                                       session A carries the trainable weight vector unless no_gate
@@ -210,8 +245,11 @@ def build_filter_bank(args, dataset):
                  seed                 the eval-mode noise seed
       dataset  a HyperCOD_data built with main_det.dataset_kwargs(args): band statistics, filter matrices, wavelengths
     Returns (fb, volts): the FilterBank and np.ndarray [N] of what each channel is (voltages; band centres in nm for
-    raw_bands; 1..K for whitened channels), which build_ec_yolo stores as model.selected_voltages.
+    raw_bands; 1..K for whitened channels; 0, 1, 2 = R, G, B for rgb_images), which build_ec_yolo stores as
+    model.selected_voltages.
     '''
+    if getattr(args, 'rgb_images', False):
+        return rgb_filter_bank(args, dataset)     # before dataset._band_stats(): the camera frame never touches the cube
     noise_db = float(getattr(args, 'read_noise_db', 0.0) or 0.0)
     noise_model = getattr(args, 'read_noise_model', None) or 'floor'
     mu, cov = dataset._band_stats()                                                      # [n_bands], [n_bands, n_bands]

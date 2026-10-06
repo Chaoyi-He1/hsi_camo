@@ -10,6 +10,7 @@ them from anywhere: `bash bash_files/<script>.sh`. `PY` (python binary) and the 
 | `launch_det_B.sh` | session B: top-10 voltages from A (`A_CKPT`, `A_RANK` overridable), detached; log `logs/det_B.log` |
 | `launch_rois_all.sh` | Stage-2 ROI export: `raw133_A`, `sel10g_clean_A`, `sel24g_clean_A` (rebuilt from their checkpoint args) on train / val / test, sequential on GPU 0, detached; `results/det/rois_<run>_<split>.json`, existing files skipped (`FORCE=1` redoes) |
 | `launch_raw133.sh` | control run: raw 133 bands (400-800 nm) into YOLO, no filter, no gate (GPU 1 by default) |
+| `launch_rgb.sh` | RGB baseline: the dataset's RGB/<id>.jpg (3 channels, /255, standardised) into YOLO26s with the unchanged COCO stem, 100 epochs as every Stage-1 run, then main_det_compare against raw133_A / sel10g_clean_A / sel24g_clean_A / pca11_A on fixed checkpoints -> results/det/compare_rgb |
 | `launch_pca11.sh` | filter model on the K PCA-whitened response directions (default K=11), no gate; `UNIFORM=12` for a uniform-voltage control |
 | `launch_sel10_queue.sh` | three fixed-10-voltage runs in sequence (greedy / session-B / uniform voltages, 40 dB read noise, whitened), then `main_det_compare.py` on their fixed checkpoints |
 | `launch_sel_followup.sh` | waits for the queue above, then the 24-voltage greedy run (40 dB) and the 10-voltage greedy run without read noise, then `main_det_compare.py` over all five |

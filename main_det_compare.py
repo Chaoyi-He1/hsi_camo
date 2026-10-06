@@ -4,7 +4,9 @@ runs are compared on their model_<epoch> checkpoints (default 59 69 79 89 99): e
 read-noise condition it was trained with ('trained': the FilterBank's own reproducible eval-mode noise, so the numbers
 match the run's validation lines) and on clean readings ('clean'), and the difference between two runs, averaged over
 the checkpoints, gets a paired bootstrap over frames. One pass over the frames serves every (run, checkpoint, condition),
-so each 0.55 GB frame is read from the cache once.
+so each 0.55 GB frame is read from the cache once. A run's input is its own: a cube run reads the cached cube, an --rgb_images run
+(the RGB baseline, rgb_A) the dataset's RGB/<id>.jpg of the same frame (rgb_images from its checkpoint's args), both read in lockstep
+over the same ids, so one comparison can hold both kinds.
   CUDA_VISIBLE_DEVICES=0 python main_det_compare.py --runs sel10g_A sel10b_A sel10u_A --out_dir results/det/compare_sel10
 Writes <out_dir>/compare.json (per-checkpoint summaries, run means, pairwise bootstrap CIs) and per_image.pkl (per-frame
 stats, re-poolable with pool()).
@@ -102,6 +104,7 @@ def load_checkpoint_model(args, run, epoch, device):
 @torch.no_grad()
 def main(args):
     main_det.load_cfg(args)
+    assert not args.rgb_images, "main_det_compare takes each run's input (cube or RGB frame) from its own checkpoint's rgb_images; do not pass --rgb_images"
     device = torch.device(args.device if args.device == 'cpu' or torch.cuda.is_available() else 'cpu')
     kw = metric_kwargs(args)
     os.makedirs(args.out_dir, exist_ok=True)
@@ -114,33 +117,40 @@ def main(args):
             noise_db = float(getattr(a, 'read_noise_db', 0.0) or 0.0)
             # a noise-free run has no 'trained' noise: its 'trained' condition is its clean evaluation
             conds = {c: ('clean' if c == 'trained' and noise_db == 0 else c) for c in args.conditions}
-            models[(run, e)] = dict(model=model, conds=conds, noise_db=noise_db)
+            rgb = bool(getattr(a, 'rgb_images', False))                                 # the run's input: its RGB frame, or the cube
+            models[(run, e)] = dict(model=model, conds=conds, noise_db=noise_db, rgb=rgb)
             fb = model.filter_bank
-            readings = ('raw bands' if getattr(a, 'raw_bands', False) else f"manual {a.filter_voltages}" if a.filter_select == 'manual'
+            readings = ('RGB image' if rgb else 'raw bands' if getattr(a, 'raw_bands', False) else f"manual {a.filter_voltages}" if a.filter_select == 'manual'
                         else f"{a.filter_select} {a.num_filters}" if a.filter_select in ('uniform', 'osp') else 'all voltages')
             print(f"{run}/model_{e}: epoch {ckpt['epoch']}, {fb.n_readings} readings ({readings}) -> {fb.n_channels} channels, "
                   f"read noise {noise_db:g} dB", flush=True)
 
-    # one pass over the frames per split
-    _, dataset_val, dataset_test = main_det.build_datasets(args)
+    # one pass over the frames per split; kinds = the inputs the models need (False: the cube, True: the RGB frame), one loader each,
+    # read in lockstep (same ids, same order, same GT)
+    kinds = sorted({m['rgb'] for m in models.values()})
+    datasets = {k: main_det.build_datasets(argparse.Namespace(**{**vars(args), 'rgb_images': k})) for k in kinds}   # (train, val, test)
     per_image, results = {}, {}
     for split in args.splits:
-        ds = dataset_test if split == 'test' else dataset_val
-        loader = torch.utils.data.DataLoader(ds, batch_size=1, shuffle=False, num_workers=args.num_workers, pin_memory=device.type == 'cuda',
-                                             collate_fn=partial(det_collate_fn, min_area=args.min_area))
+        loaders = {k: torch.utils.data.DataLoader(datasets[k][2] if split == 'test' else datasets[k][1], batch_size=1, shuffle=False,
+                                                  num_workers=args.num_workers, pin_memory=device.type == 'cuda',
+                                                  collate_fn=partial(det_collate_fn, min_area=args.min_area)) for k in kinds}
+        loader = loaders[kinds[0]]
         for m in models.values():
             m['model'].eval()  # restarts every bank's eval-noise sequence: the same draws as the run's own validation pass
         stats, names, t0 = {}, [], time.time()
-        for i, batch in enumerate(loader):
-            img = batch['img'].to(device, non_blocking=True)  # [1, 133, H, W] fp16
+        for i, batches in enumerate(zip(*loaders.values())):
+            batches = dict(zip(kinds, batches))
+            batch = batches[kinds[0]]
+            assert all(b['names'] == batch['names'] for b in batches.values()), f"frames out of step: {[b['names'] for b in batches.values()]}"
+            imgs = {k: b['img'].to(device, non_blocking=True) for k, b in batches.items()}  # [1, 133, H, W] fp16 cube, [1, 3, H, W] fp16 RGB frame
             mask, name = batch['masks'][0], batch['names'][0]
             names.append(name)
-            H, W = img.shape[-2:]
+            H, W = imgs[kinds[0]].shape[-2:]
             for (run, e), m in models.items():
                 for cond in sorted(set(m['conds'].values()), reverse=True):  # 'trained' before 'clean': one noise draw per frame, as in training
                     m['model'].filter_bank.noise_scale = 1.0 if cond == 'trained' else 0.0
                     with torch.autocast(device.type, enabled=device.type == 'cuda'):
-                        out = m['model'](img)
+                        out = m['model'](imgs[m['rgb']])
                     d = decode_predictions(out, conf_thres=args.conf_thres, iou_thres=args.iou_thres, max_det=args.max_det,
                                            end2end=getattr(m['model'].yolo, 'end2end', None))[0].copy()
                     d[:, [0, 2]] = d[:, [0, 2]].clip(0, W); d[:, [1, 3]] = d[:, [1, 3]].clip(0, H)

@@ -1,4 +1,5 @@
 import os
+import cv2
 import numpy as np
 import h5py
 import scipy.io as sio
@@ -8,6 +9,18 @@ from PIL import Image
 # tiny stand-in for the real 1680 x 1240 x 200 cubes
 H, W, B = 48, 40, 200
 OBJ_SLICE = (slice(10, 16), slice(20, 26))   # 6 x 6 foreground object in every GT
+RGB_LEVELS = (200, 120, 40)                  # mean R, G, B of the fixture RGB frames: a swapped channel order is visible
+
+
+def write_rgb(root, split, name):
+    '''<split>/RGB/<id>.jpg like the dataset's own camera frames: [H, W, 3] uint8, channel levels RGB_LEVELS plus a
+    horizontal ramp and noise, its own deterministic stream per id (the cube rng stays untouched). Returns the RGB array.'''
+    rng = np.random.default_rng(1000 + int(name))
+    rgb = np.asarray(RGB_LEVELS, dtype=np.float64)[None, None] + np.linspace(-30, 30, W)[None, :, None] + rng.normal(0, 12, (H, W, 3))
+    rgb = np.clip(rgb, 0, 255).astype(np.uint8)                                  # [H, W, 3]
+    os.makedirs(os.path.join(root, split, 'RGB'), exist_ok=True)
+    assert cv2.imwrite(os.path.join(root, split, 'RGB', f'{name}.jpg'), np.ascontiguousarray(rgb[:, :, ::-1]))   # cv2 writes BGR
+    return rgb
 
 
 def write_sample(root, split, name, rng):
@@ -19,6 +32,7 @@ def write_sample(root, split, name, rng):
     gt[OBJ_SLICE] = 255
     # real GTs are 3-channel; write 3 identical channels
     Image.fromarray(np.stack([gt] * 3, axis=-1)).save(os.path.join(root, split, 'GT', f'{name}.png'))
+    write_rgb(root, split, name)
     p99 = float(np.percentile(cube.sum(axis=0), 99))   # intensity = sum over bands
     return cube, gt > 127, p99
 
@@ -29,7 +43,7 @@ def synthetic_root(tmp_path):
     root = tmp_path / 'HyperCOD'
     info = {}
     for split, names in (('train', ['3', '10']), ('test', ['7'])):
-        for sub in ('hyperspectral', 'GT', 'intensity map'):
+        for sub in ('hyperspectral', 'GT', 'intensity map', 'RGB'):
             (root / split / sub).mkdir(parents=True)
         rows = []
         for name in names:

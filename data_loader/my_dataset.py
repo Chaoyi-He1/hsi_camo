@@ -5,13 +5,15 @@ import random
 import argparse
 import warnings
 import numpy as np
+import cv2
 import h5py
 import torch
 from PIL import Image
 
 from data_loader.ec_filter import (N_BANDS, WAVELENS_200, band_indices, load_ec_filter, align_filter_to_wavelens,
                                    select_filter_channels, candidate_indices)
-from data_loader.band_stats import STATS_CROP_SIZE, default_stats_path, load_band_stats, compute_band_stats
+from data_loader.band_stats import (STATS_CROP_SIZE, RGB_STATS_SEED, default_stats_path, default_rgb_stats_path, load_band_stats,
+                                    compute_band_stats, load_rgb_stats, compute_rgb_stats)
 
 GT_THRESHOLD = 127            # GT pngs are JPEG-compressed with 3 identical channels; foreground = channel 0 > 127
 HYPERCUBE_KEY = 'hypercube'   # variable name inside the MATLAB v7.3 (HDF5) .mat cubes
@@ -21,7 +23,7 @@ class HyperCOD_data(Dataset.Dataset):
     def __init__(self, data_path, split='train', use_filter=True, filter_path=None, num_filters=30,
                  filter_select='uniform', filter_voltages=None, crop_size=512, obj_crop_prob=0.5,
                  norm='p99z', band_range=(400.0, 800.0), filter_norm='l1', stats_path=None, seed=None,
-                 cache_dir=None, ids=None, out_dtype='float32'):
+                 cache_dir=None, ids=None, out_dtype='float32', rgb_images=False):
         super(HyperCOD_data, self).__init__()
         self.data_path = data_path
         self.split = split  # 'train' or 'test'
@@ -35,6 +37,12 @@ class HyperCOD_data(Dataset.Dataset):
         # normalisation layers: 'p99' = per-scene scalar (cube / (intensity_p99 / n_bands)),
         # 'p99z' = p99 followed by per-channel standardisation with training band statistics
         self.norm = norm  # 'none', 'p99' or 'p99z'
+        # the Stage-1 RGB baseline: __getitem__ returns the dataset's own <split>/RGB/<id>.jpg as [3, H, W] uint8 / 255 instead
+        # of the hyperspectral cube - no band window, no p99 scaling, no filter, no cube cache, no band statistics (the
+        # standardisation is the FilterBank's, from rgb_stats). norm is then 'none': uint8 / 255 is all the loader does.
+        self.rgb_images = bool(rgb_images)
+        if self.rgb_images:
+            self.norm = 'none'
         # 'l1' divides every selected filter column by its L1 norm, so a channel is a weighted average of bands
         # (same scale as a raw band) instead of a weighted sum ~20-65x larger; 'none' keeps the peak-normalised columns
         self.filter_norm = filter_norm
@@ -67,6 +75,8 @@ class HyperCOD_data(Dataset.Dataset):
         self.hsi_path = os.path.join(self.data_path, self.split, 'hyperspectral')
         self.gt_path = os.path.join(self.data_path, self.split, 'GT')
         self.intensity_path = os.path.join(self.data_path, self.split, 'intensity map')
+        self.rgb_path = os.path.join(self.data_path, self.split, 'RGB')                 # <id>.jpg, [H, W, 3] uint8, pixel-aligned with the cube and GT
+        self.rgb_stats_path = default_rgb_stats_path(self.data_path)                    # the TRAIN frames' statistics, whatever the split
         assert os.path.isdir(self.hsi_path), f"{self.hsi_path} does not exist"
         assert os.path.isdir(self.gt_path), f"{self.gt_path} does not exist"
 
@@ -82,13 +92,18 @@ class HyperCOD_data(Dataset.Dataset):
         assert len(self.img_name) > 0, f"no .mat files found in {self.hsi_path}"
         for name in self.img_name:
             assert os.path.exists(os.path.join(self.gt_path, f'{name}.png')), f"GT for sample {name} not found in {self.gt_path}"
+            if self.rgb_images:
+                assert os.path.exists(os.path.join(self.rgb_path, f'{name}.jpg')), f"RGB for sample {name} not found in {self.rgb_path}"
 
         # self.wavelens is shape [n_bands], the cube band centres inside band_range (uniform 3.015 nm step)
         self.wavelens = WAVELENS_200[self.band_idx].copy()
 
-        # image size from the first GT; the cube layout is verified against it
+        # image size from the first GT; the cube layout (the RGB frame in RGB mode) is verified against it
         self.H, self.W = self.load_gt(self.img_name[0]).shape
-        self.check_cube_layout(self.img_name[0])
+        if self.rgb_images:
+            self.read_rgb(self.img_name[0])
+        else:
+            self.check_cube_layout(self.img_name[0])
         if self.split == 'train' and self.crop_size > 0:
             assert self.crop_size <= min(self.H, self.W), f"crop_size {self.crop_size} exceeds image size ({self.H}, {self.W})"
 
@@ -97,7 +112,7 @@ class HyperCOD_data(Dataset.Dataset):
 
         self.scale = self.load_intensity_scale() if self.norm in ['p99', 'p99z'] else None
 
-        self.in_channels = self.sensor_R_matrix.shape[1] if self.use_filter else self.n_bands
+        self.in_channels = 3 if self.rgb_images else self.sensor_R_matrix.shape[1] if self.use_filter else self.n_bands
 
         # per-channel mean/std [C] for norm='p99z' (None otherwise), applied after the filter projection
         self.channel_mean, self.channel_std = self.load_channel_stats() if self.norm == 'p99z' else (None, None)
@@ -185,6 +200,20 @@ class HyperCOD_data(Dataset.Dataset):
             compute_band_stats(self.data_path, self.stats_path, crop_size=crop_size, num_workers=num_workers,
                                filter_path=self.filter_path, band_range=self.band_range)
         return load_band_stats(self.stats_path, band_range=self.band_range)  # [n_bands], [n_bands, n_bands]
+
+    def _rgb_stats(self):
+        '''
+        (mu [3], cov [3, 3]) as float64 of the RGB frames' /255 values (R, G, B), the TRAIN split's whatever split this dataset
+        reads: <data_path>/rgb_stats_train.npz, built on first use (band_stats.compute_rgb_stats: one seeded 512 x 512 crop per
+        train frame, the whole train split directory) and just loaded afterwards, its metadata checked against what this
+        dataset would build. The RGB baseline's FilterBank takes its mean and std from here (build_filter_bank); the
+        counterpart of _band_stats.
+        '''
+        crop_size = STATS_CROP_SIZE if min(self.H, self.W) >= STATS_CROP_SIZE else 0     # tiny frames: full frames
+        if not os.path.exists(self.rgb_stats_path):
+            compute_rgb_stats(self.data_path, self.rgb_stats_path, crop_size=crop_size, seed=RGB_STATS_SEED, filter_path=self.filter_path)
+        n_train = len([f for f in os.listdir(os.path.join(self.data_path, 'train', 'hyperspectral')) if f.endswith('.mat')])
+        return load_rgb_stats(self.rgb_stats_path, crop_size=crop_size, seed=RGB_STATS_SEED, n_samples=n_train)   # [3], [3, 3]
 
     def load_channel_stats(self):
         '''
@@ -284,6 +313,18 @@ class HyperCOD_data(Dataset.Dataset):
             f"cube {name}: window (h0={h0}, w0={w0}, ch={ch}, cw={cw}) returned {blk.shape}, expected ({self.n_bands}, {cw}, {ch}); is this cube smaller than the first sample?"
         return blk
 
+    def read_rgb(self, name):
+        '''
+        The camera frame <split>/RGB/<name>.jpg as RGB uint8 [H, W, 3] (cv2 decodes to BGR, so the channel axis is reversed:
+        a view, no copy), checked against the GT size - the frames are pixel-aligned with the cube and the GT, so a frame of
+        another shape (a rotated or transposed export) must not be silently cropped with the GT's window.
+        '''
+        path = os.path.join(self.rgb_path, f'{name}.jpg')
+        bgr = cv2.imread(path, cv2.IMREAD_COLOR)
+        assert bgr is not None, f"cannot read the RGB frame {path}"
+        assert bgr.shape == (self.H, self.W, 3), f"RGB frame {name} has shape {bgr.shape}, expected (H, W, 3) = ({self.H}, {self.W}, 3) like its GT"
+        return bgr[:, :, ::-1]
+
     def crop_window(self, gt):
         '''
         Choose the crop (h0, w0, ch, cw).
@@ -312,6 +353,13 @@ class HyperCOD_data(Dataset.Dataset):
         name = self.img_name[idx]
         gt = self.load_gt(name)  # [H, W] bool
         h0, w0, ch, cw = self.crop_window(gt)
+
+        if self.rgb_images:
+            # [ch, cw, 3] uint8 crop -> [3, ch, cw] uint8 / 255 in out_dtype (float32 first, so float16 rounds once)
+            rgb = self.read_rgb(name)[h0:h0 + ch, w0:w0 + cw]
+            img = (np.ascontiguousarray(rgb.transpose(2, 0, 1), dtype=np.float32) / 255.0).astype(self.out_dtype)  # [3, ch, cw]
+            gt = gt[h0:h0 + ch, w0:w0 + cw].astype(np.float32)[None]  # [1, ch, cw]
+            return img, gt, name
 
         blk = self.read_cube_block(name, h0, w0, ch, cw)  # [B, cw, ch], float32 (h5) or float16 view (cache)
         if self.norm in ['p99', 'p99z']:

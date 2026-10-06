@@ -7,6 +7,9 @@ from data_loader.ec_filter import N_BANDS, band_indices
 
 STATS_FILENAME = 'band_stats_train.npz'   # saved next to the data, like data_range.npz in the previous project
 STATS_CROP_SIZE = 512                      # one crop of this size per training cube (full frame if the cube is smaller)
+RGB_STATS_FILENAME = 'rgb_stats_train.npz'  # the RGB baseline's statistics (compute_rgb_stats), next to the band statistics
+RGB_STATS_NORM = 'rgb255'                   # what the statistics are of: uint8 / 255 values in R, G, B order, nothing else
+RGB_STATS_SEED = 0                          # the crop stream of the one crop per frame
 
 
 def default_stats_path(data_path, band_range=(400.0, 800.0)):
@@ -53,6 +56,64 @@ def compute_band_stats(data_path, stats_path, crop_size=STATS_CROP_SIZE, num_wor
     np.savez(stats_path, mean=mean, cov=cov, n_pixels=n, n_samples=len(dataset), crop_size=crop_size,
              norm='p99', wavelens=dataset.wavelens, band_range=np.array(band_range))
     print(f"Band statistics saved to {stats_path}")
+    return mean, cov
+
+
+def default_rgb_stats_path(data_path):
+    '''rgb_stats_train.npz next to the data, like band_stats_train.npz.'''
+    return os.path.join(data_path, RGB_STATS_FILENAME)
+
+
+def compute_rgb_stats(data_path, stats_path, crop_size=STATS_CROP_SIZE, seed=RGB_STATS_SEED, filter_path=None):
+    '''
+    Mean [3] and covariance [3, 3] of the dataset's own RGB frames (<split>/RGB/<id>.jpg, uint8 / 255, channels in R, G, B
+    order) over the TRAIN split, accumulated in float64 from one uniform random crop per frame (crop_size == 0: the full
+    frame), the same convention as compute_band_stats: it covers every id of the train split directory (all 279 frames, so the
+    detector's 251 training frames AND its 28 held-out validation frames, not the detector's own training ids), so one file
+    serves every run, and the crop of a frame is drawn with obj_crop_prob=0 from a stream seeded with `seed`, frame by frame in
+    id order (in process, so the file is reproducible). The RGB baseline's FilterBank standardises with these statistics
+    (models.filter_bank.build_filter_bank).
+    Saves mean, cov, n_pixels, n_samples, crop_size, seed and norm to stats_path and returns (mean, cov).
+    '''
+    from data_loader.my_dataset import HyperCOD_data   # local import: my_dataset imports this module
+    dataset = HyperCOD_data(data_path, split='train', filter_path=filter_path, crop_size=crop_size, obj_crop_prob=0.0, seed=seed,
+                            rgb_images=True)
+    s1 = np.zeros(3, dtype=np.float64)           # sum of x       [3]
+    s2 = np.zeros((3, 3), dtype=np.float64)      # sum of x x^T   [3, 3]
+    n = 0
+    print(f"Computing RGB statistics from {len(dataset)} training frames (crop_size={crop_size})...")
+    for i in range(len(dataset)):
+        img, _, _ = dataset[i]                                  # [3, ch, cw] float32, /255
+        x = img.reshape(3, -1).astype(np.float64)               # [3, P]
+        s1 += x.sum(axis=1)
+        s2 += x @ x.T
+        n += x.shape[1]
+        if (i + 1) % 25 == 0 or i + 1 == len(dataset):
+            print(f"  {i + 1}/{len(dataset)} frames, {n} pixels")
+    mean = s1 / n                                          # [3]
+    cov = s2 / n - np.outer(mean, mean)                    # [3, 3], population covariance
+    cov = 0.5 * (cov + cov.T)                              # exact symmetry against float round-off
+    os.makedirs(os.path.dirname(os.path.abspath(stats_path)), exist_ok=True)
+    np.savez(stats_path, mean=mean, cov=cov, n_pixels=n, n_samples=len(dataset), crop_size=crop_size, seed=seed, norm=RGB_STATS_NORM)
+    print(f"RGB statistics saved to {stats_path}")
+    return mean, cov
+
+
+def load_rgb_stats(stats_path, crop_size=None, seed=None, n_samples=None):
+    '''
+    Returns (mean [3], cov [3, 3]) as float64 from a file written by compute_rgb_stats. The file's metadata must match what the
+    caller expects: norm always, and crop_size / seed / n_samples when given - a file built from other crops or from a
+    different set of frames must not silently be reused.
+    '''
+    st = np.load(stats_path)
+    mean = np.asarray(st['mean'], dtype=np.float64)
+    cov = np.asarray(st['cov'], dtype=np.float64)
+    assert mean.shape == (3,), f"{stats_path}: mean has shape {mean.shape}, expected (3,)"
+    assert cov.shape == (3, 3), f"{stats_path}: cov has shape {cov.shape}, expected (3, 3)"
+    assert str(st['norm']) == RGB_STATS_NORM, f"{stats_path}: norm {str(st['norm'])!r} does not match {RGB_STATS_NORM!r}"
+    for key, want in (('crop_size', crop_size), ('seed', seed), ('n_samples', n_samples)):
+        if want is not None:
+            assert int(st[key]) == int(want), f"{stats_path}: {key} {int(st[key])} does not match requested {int(want)}"
     return mean, cov
 
 

@@ -33,7 +33,7 @@ from train_eval.box_metrics import mask_coverage, filter_to_operating_point
 # checkpoint lacks one (raw133_A has no pca_channels / read_noise_* / no_gate), from main_det's parser default -- never
 # from the caller's command line. hpy too: it is the detector's cfg (the operating point load_cfg fills from it), and a
 # Stage-2 caller passes its own cfg/seg.yaml under the same name.
-DET_MODEL_KEYS = ('session', 'top_k', 'raw_bands', 'pca_channels', 'no_gate', 'filter_select', 'filter_voltages', 'num_filters',
+DET_MODEL_KEYS = ('session', 'top_k', 'raw_bands', 'rgb_images', 'pca_channels', 'no_gate', 'filter_select', 'filter_voltages', 'num_filters',
                   'filter_path', 'band_range', 'read_noise_db', 'read_noise_db_range', 'read_noise_model', 'seed', 'yolo_variant',
                   'gate_entropy_weight', 'contain_weight', 'epochs', 'hpy')
 

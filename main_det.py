@@ -7,6 +7,8 @@ Session B (top-10 voltages from A, no weight vector), initialised from A:
   python main_det.py --session B --top_k 10 --ranking weights/det_A/gate_ranking.csv --resume weights/det_A/model_best --name det_B --output-dir weights/det_B
 Evaluate a checkpoint on val + test:
   python main_det.py --session B --resume weights/det_B/model_best --eval
+RGB camera baseline (the dataset's RGB/<id>.jpg, 3 channels, no gate / noise / cube cache; bash_files/launch_rgb.sh runs it):
+  python main_det.py --session A --rgb_images --name rgb_A --output-dir weights/rgb_A
 Fixed voltages chosen by main_select_voltages.py, a 40 dB read-noise floor and noise-regularised whitening (spec §12):
   python main_det.py --session A --filter-select manual --filter-voltages 1.75 -0.44 1.36 0.48 -0.65 -0.36 1.70 0.01 -0.86 1.45 \
       --pca-channels 10 --read_noise_db 40 --name sel10g_A --output-dir weights/sel10g_A
@@ -42,6 +44,7 @@ from data_loader.boxes import det_collate_fn
 from data_loader.det_splits import make_det_splits
 from data_loader.cube_cache import default_cache_dir
 from models.ec_yolo import build_ec_yolo, select_top_k, slice_to_channels
+from models.filter_bank import assert_rgb_compatible
 from train_eval.train_eval_det import train_one_epoch, evaluate
 from train_eval.box_metrics import select_score
 
@@ -71,6 +74,10 @@ def get_args_parser():
     parser.add_argument('--raw-bands', action='store_true',
                         help='control run: feed the raw cube bands of --band-range straight into YOLO (identity projection, '
                              'band-statistics standardisation, no weight vector) instead of EC filter responses; pass it again with --eval/--resume')
+    parser.add_argument('--rgb_images', action='store_true',
+                        help="Stage-1 RGB baseline: read the dataset's own RGB/<id>.jpg (3 channels, /255) instead of the hyperspectral cube; "
+                             "identity front end standardised with RGB train statistics, no gate, no read noise; excludes --raw-bands, "
+                             "--pca-channels, --read_noise_db and session B; pass it again with --eval/--resume (the model is rebuilt from the CLI flags)")
     parser.add_argument('--read_noise_db', type=float, default=0.0,
                         help='simulate Gaussian read noise on every filter reading at this SNR (dB) inside the FilterBank, in training '
                              'and (reproducibly) in evaluation; with --pca-channels the whitening is regularised by the same noise. 0 disables; '
@@ -155,12 +162,14 @@ def load_cfg(args):
 def dataset_kwargs(args):
     '''
     HyperCOD_data kwargs shared by training and the ROI export (main_det_rois), so both read the same fp16 cache
-    (~0.3 s/frame instead of 9.5 s through h5py) and the same numeric path the model was trained on.
+    (~0.3 s/frame instead of 9.5 s through h5py) and the same numeric path the model was trained on. With --rgb_images the
+    dataset reads the RGB/<id>.jpg frames instead and the cache, the band window and the p99 scaling are not used.
     '''
     return dict(data_path=args.data_path, use_filter=False, norm='p99', crop_size=0, out_dtype='float16',
                 cache_dir=args.cache_dir or default_cache_dir(args.data_path),
                 band_range=tuple(args.band_range), filter_path=args.filter_path, num_filters=args.num_filters,
-                filter_select=args.filter_select, filter_voltages=args.filter_voltages, filter_norm='l1')
+                filter_select=args.filter_select, filter_voltages=args.filter_voltages, filter_norm='l1',
+                rgb_images=bool(getattr(args, 'rgb_images', False)))
 
 
 def build_datasets(args):
@@ -237,6 +246,7 @@ def save_checkpoint(path, model, optimizer, scaler, scheduler, epoch, args, best
 def main(args):
     utils.init_distributed_mode(args)
     cfg = load_cfg(args)
+    assert_rgb_compatible(args)                                  # --rgb_images with --raw-bands / --pca-channels / --read_noise_db / session B: before any output exists
     args.name = args.name or f'det_{args.session}'
     device = torch.device(args.device if args.device == 'cpu' or torch.cuda.is_available() else 'cpu')
     seed = args.seed + utils.get_rank(); torch.manual_seed(seed); np.random.seed(seed); random.seed(seed)
@@ -244,7 +254,8 @@ def main(args):
     logger = TrainLogger(args, cfg)
 
     dataset_train, dataset_val, dataset_test = build_datasets(args)
-    print(f"train {len(dataset_train)} / val {len(dataset_val)} / test {len(dataset_test)} frames, {dataset_train.n_bands} bands")
+    print(f"train {len(dataset_train)} / val {len(dataset_val)} / test {len(dataset_test)} frames, "
+          + ("RGB images (3 channels)" if args.rgb_images else f"{dataset_train.n_bands} bands"))
     sampler_train = build_train_sampler(dataset_train, args.distributed)
     collate = partial(det_collate_fn, min_area=args.min_area)
     mk = lambda ds, sampler, bs, shuffle: torch.utils.data.DataLoader(ds, batch_size=bs, sampler=sampler, shuffle=shuffle, num_workers=args.num_workers,
@@ -306,7 +317,7 @@ def main(args):
         # the numbers; the other ranks simply wait at the next epoch's first all-reduce.
         if utils.is_main_process():
             val = evaluate(model_without_ddp, loader_val, device, logger=logger, epoch=epoch, tag='val', **eval_kw)
-            if args.session == 'A' and model_without_ddp.filter_bank.weight_vector:      # no gate in a --raw-bands control
+            if args.session == 'A' and model_without_ddp.filter_bank.weight_vector:      # no gate in a --raw-bands control or the --rgb_images baseline
                 w = model_without_ddp.filter_bank.weights.detach().cpu().numpy(); volts = model_without_ddp.selected_voltages
                 logger.histogram('gate/weights', w, epoch); logger.scalars({'gate/max': w.max(), 'gate/entropy': float(model_without_ddp.filter_bank.entropy().detach())}, epoch)
                 order = np.argsort(-w)[:20]; logger.table('gate/top20', ['rank', 'voltage', 'weight'], [[r + 1, float(volts[i]), float(w[i])] for r, i in enumerate(order)], epoch)
