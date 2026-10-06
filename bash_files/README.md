@@ -16,6 +16,7 @@ them from anywhere: `bash bash_files/<script>.sh`. `PY` (python binary) and the 
 | `launch_sel_clean_queue.sh` | noise-free redo: session-B / uniform / greedy-24 voltage sets without read noise, then `main_det_compare.py` of every noise-free run (incl. PCA-11, raw, sessions A and B) |
 | `copy_cache_to_nvme.sh` | optional: mirror the 181 GB fp16 frame cache to the NVMe `/home` partition (ask first) |
 | `setup_third_party.sh` | Stage 2, once per machine: pinned `sam2` + hydra-core, `pysodmetrics` (no deps, keeps numpy 2.5.2) + scikit-image/learn, einops + timm; ZoomNeXt clone into git-ignored `third_party/zoomnext/` (no licence: research use only); SAM2 v1 / SAM2.1 Hiera-L and ZoomNeXt-B2 checkpoints into `weights/pretrained/`; verifies every checkpoint strict-loads |
+| `launch_seg_queue.sh` | Stage 2: crop cache once (if `index.json` is missing), then the 27 `seg_<model>_<arm>_s<seed>` runs (sam2unet / sam2box / zoomnext x raw / ec10 / ec24 x seeds 0-2, seed-major) and the `seg_sam2unet_rgb` control, then `main_seg_eval.py` over every finished run + the zero-shot SAM2.1 control -> `results/seg/compare.json` (and `model_last` -> `results/seg_last`, `EVAL_LAST=` disables); batch size / accumulation from `cfg/seg.yaml`; detached, log `logs/seg_queue.log`; `LIST_ONLY=1` prints the plan, `CACHE_ONLY=1` stops after the cache |
 
 Background runs use `python -u` (redirected stdout is block-buffered otherwise) and `setsid nohup`, so they survive the
 launching shell. Only one full-resolution training job fits on the box at a time (see spec §12).
