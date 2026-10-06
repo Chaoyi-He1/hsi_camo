@@ -13,12 +13,17 @@ The frames are read once per pass (HyperCOD_data: fp16 cache, O_DIRECT full-fram
 of one pass (--runs_per_pass) keep their models on the GPU, so 29 SAM2-L sized runs need 5 passes instead of 29. Test items
 are built with the crop cache's geometry (data_loader.roi_crops: pixel_box, place_on_canvas, box_to_canvas, rasterise_box),
 so a test ROI gives exactly the tensors HyperCOD_roi gives for the same ROI. Every row carries its frame, so the paired
-bootstrap resamples frames.
+bootstrap resamples frames. Before the first pass every run's front end is built (and checked against its detector's
+filter bank) and every checkpoint is loaded into its model on the CPU, so a bad run fails in seconds, not after hours.
   CUDA_VISIBLE_DEVICES=0 python main_seg_eval.py --runs seg_sam2unet_raw_s0 seg_sam2unet_ec10_s0 --zero_shot
   CUDA_VISIBLE_DEVICES=0 python main_seg_eval.py --runs seg_sam2unet_raw_s0 --ckpt model_last --out_dir results/seg_last
-Writes <out_dir>/<run>/eval_roi_oracle.json, eval_full_oracle.json, eval_full_det.json, per_image.pkl (per-image rows,
-re-poolable with train_eval.seg_metrics.pool) and <out_dir>/compare.json: mean +- std over seeds per (model, arm), and
-paired bootstrap CIs (train_eval.seg_metrics.bootstrap_seg) for the same model across arms and the same arm across models.
+Writes <out_dir>/<run>/eval_roi_oracle.json, eval_full_oracle.json, eval_full_det.json, per_image.pkl and
+<out_dir>/compare.json: mean +- std over seeds per (model, arm), and paired bootstrap CIs
+(train_eval.seg_metrics.bootstrap_seg) for the same model across arms and the same arm across models.
+per_image.pkl = {level: {'keys', 'rows', 'fp_rows'}}: 'rows' are the scored images (kind 'obj', in 'keys' order: the
+paired bootstrap input), 'fp_rows' the detector's false-positive ROIs (kind 'fp', full_det only; each detector has its own,
+so they never enter the pairing); train_eval.seg_metrics.pool(rows + fp_rows) gives the level's summary, false-mask
+rate included.
 """
 import os
 if "RANK" not in os.environ and "CUDA_VISIBLE_DEVICES" not in os.environ:
@@ -296,9 +301,11 @@ def write_run(args, spec):
             json.dump(obj, f, indent=1, default=to_json)
     spec['summary'] = summ
     spec['keys'] = st['keys']
+    # the paired rows (bootstrap input) and, apart, the false-positive ROI rows (update_fp): rows + fp_rows re-pool to summ
     spec['per_image'] = {lvl: [st['metrics'][lvl].per_image[i] for i in st['rows'][lvl]] for lvl in st['metrics']}
+    fp_rows = {lvl: [r for r in st['metrics'][lvl].per_image if r['kind'] == 'fp'] for lvl in st['metrics']}
     with open(os.path.join(d, 'per_image.pkl'), 'wb') as f:
-        pickle.dump({lvl: dict(keys=spec['keys'][lvl], rows=spec['per_image'][lvl]) for lvl in spec['per_image']}, f)
+        pickle.dump({lvl: dict(keys=spec['keys'][lvl], rows=spec['per_image'][lvl], fp_rows=fp_rows[lvl]) for lvl in spec['per_image']}, f)
     s, c, p = summ['roi_oracle'], summ['full_det'], files['full_det']['paper']
     print(f"{spec['name']}: roi_oracle S {s['S']:.3f} Fw {s['Fw']:.3f} IoU {s['IoU']:.3f} | full_det S {c['S']:.3f} Fw {c['Fw']:.3f} "
           f"IoU {c['IoU']:.3f}, false-mask rate {c['fp_false_mask_rate']:.3f} | paper MAE {p['MAE']:.4f} E {p['E_mean']:.3f} "
@@ -364,6 +371,26 @@ def compare(args, specs):
     return out
 
 
+def check_runs(specs, device):
+    '''
+    Up-front checks, before the first frame pass: the front end of every (arm, detector) is built, raw / ec10 / ec24 with
+    the detector checkpoint's state (build_front_end checks the arm and the filter bank, spec §9), and every run's model is
+    built on the CPU with its checkpoint loaded (build_run_model: no unexpected keys, only frozen ones missing), then freed.
+    A broken run thus fails in seconds instead of after the passes of the runs before it. Returns the front ends on device,
+    {(arm, detector key): front end}, shared by the runs of each pair.
+    '''
+    fronts = {}
+    for s in specs:
+        key = (s['arm'], s['det']['key'])
+        if key not in fronts:
+            det_state = None if s['arm'] == 'rgb' else s['det']['det_state']
+            fronts[key] = build_front_end(s['arm'], s['det']['det_args'], s['det']['dataset'], det_state=det_state).to(device).eval()
+        model = build_run_model(s, fronts[key], torch.device('cpu'))
+        del model
+        print(f"{s['name']}: front end ({fronts[key].n_out} channels) and {'pretrained model' if s['zero_shot'] else s['path']} ok", flush=True)
+    return fronts
+
+
 @torch.no_grad()
 def main(args):
     device = torch.device(args.device if args.device == 'cpu' or torch.cuda.is_available() else 'cpu')
@@ -384,20 +411,19 @@ def main(args):
         print(f"{s['name']}: {s['model_label']}, arm {s['arm']}, seed {s['seed']}, epoch {s['epoch']}, detector {s['det']['det_run']} "
               f"({s['det']['roi_file']})", flush=True)
 
+    # check every front end (spec §9 filter bank) and every run's checkpoint before the first pass
+    fronts = check_runs(specs, device)                                # one front end per (arm, detector), shared by its runs
+
     # the test frames, read through HyperCOD_data exactly as the detectors' ROI export read them
     dataset = specs[0]['det']['dataset']
     if args.limit:
         dataset = Dataset.Subset(dataset, list(range(min(args.limit, len(dataset)))))
-    fronts = {}
+
+    # evaluate: one pass over the test frames per runs_per_pass runs, their models on the device
     for p0 in range(0, len(specs), args.runs_per_pass):
         group = specs[p0:p0 + args.runs_per_pass]
         for s in group:
-            key = (s['arm'], s['det']['key'])
-            if key not in fronts:                                     # one front end per (arm, detector), shared by its runs
-                # spec §9: raw / ec10 / ec24 front ends are checked against the detector checkpoint's filter bank
-                det_state = None if s['arm'] == 'rgb' else s['det']['det_state']
-                fronts[key] = build_front_end(s['arm'], s['det']['det_args'], s['det']['dataset'], det_state=det_state).to(device).eval()
-            s['front'] = fronts[key]
+            s['front'] = fronts[(s['arm'], s['det']['key'])]
             s['model'] = build_run_model(s, s['front'], device)
             s['state'] = new_state(tuple(args.size_edges))
         loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=args.num_workers,
@@ -424,11 +450,14 @@ def main(args):
                 evaluate_frame(s, oracle, det_items[s['det']['key']], gt, name, device, args)
             if i % 10 == 0 or i == len(loader) - 1:
                 print(f"pass {p0 // args.runs_per_pass + 1}: {i + 1}/{len(loader)} frames, {time.time() - t0:.0f}s", flush=True)
+        # write the pass's runs: eval_*.json and per_image.pkl, then free their models
         for s in group:
             write_run(args, s)
             del s['model'], s['front'], s['state']
         if device.type == 'cuda':
             torch.cuda.empty_cache()
+
+    # compare: mean +- std over seeds, paired frame bootstrap
     return compare(args, specs)
 
 

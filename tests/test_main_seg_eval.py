@@ -15,6 +15,7 @@ from tests.test_roi_crops import _crop_cache
 from data_loader.cube_cache import build_cube_cache, default_cache_dir
 from data_loader.roi_crops import HyperCOD_roi
 from data_loader.my_dataset import HyperCOD_data
+from train_eval.seg_metrics import pool
 
 OBJ_BOX = [20.0, 10.0, 26.0, 16.0]          # conftest OBJ_SLICE (rows 10:16, cols 20:26) as xyxy
 FP_BOX = [2.0, 36.0, 8.0, 42.0]             # a detector box far from the object (covers 0 % of its mask)
@@ -105,6 +106,12 @@ def test_eval_levels_runs_and_compare(synthetic_root, tmp_path, monkeypatch):
     assert pi['roi_oracle']['keys'] == [('7', 0), ('8', 0)] and pi['full_det']['keys'] == ['7', '8']
     assert len(pi['full_det']['rows']) == 2                                  # the fp ROI is not a frame row
     assert [r['frame'] for r in pi['roi_oracle']['rows']] == ['7', '8']     # rows carry their frame: frame bootstrap
+    # ... it is kept apart as an fp row, so rows + fp_rows re-pool to the written summaries, false-mask rate included
+    assert [r['kind'] for r in pi['full_det']['fp_rows']] == ['fp'] and pi['full_det']['fp_rows'][0]['frame'] == '7'
+    assert all(r['kind'] == 'obj' for lvl in pi for r in pi[lvl]['rows'])
+    for lvl, summary in (('roi_oracle', roi['summary']), ('full_oracle', full['summary']), ('full_det', det['summary'])):
+        pooled = json.loads(json.dumps(pool(pi[lvl]['rows'] + pi[lvl]['fp_rows']), default=main_seg_eval.to_json))
+        assert pooled.keys() == summary.keys() and pooled == pytest.approx(summary, nan_ok=True), lvl
 
     # compare.json: seeds pooled per (model, arm); identical models -> zero differences with a degenerate CI
     cmp = json.loads((tmp_path / 'seg' / 'compare.json').read_text())
@@ -137,11 +144,36 @@ def test_zero_shot_control_uses_the_pretrained_stem(synthetic_root, tmp_path, mo
         return BoxEcho(n_in, gain=20.0)
     monkeypatch.setattr(main_seg_eval, 'build_seg_model', _build)
     main_seg_eval.main(_eval_args(root, tmp_path, roi_dir, '--zero_shot', '--zero_shot_det_ckpt', str(det_ckpt), '--canvas', '32'))
-    (model, arm, canvas, n_in, P, q), = calls
+    assert len(calls) == 2                                                     # the up-front check (CPU), then the pass
+    (model, arm, canvas, n_in, P, q) = calls[-1]
+    assert all(c[:4] == calls[-1][:4] for c in calls)
     assert (model, arm, canvas, n_in) == ('sam2box', 'rgb', 32, 3)
     assert np.array_equal(P, np.eye(3)) and np.array_equal(q, np.zeros(3))     # fold_stem(conv, I, 0) = the RGB stem itself
     det = json.loads((tmp_path / 'seg' / main_seg_eval.ZS_NAME / 'eval_full_det.json').read_text())
     assert det['seg_model'] == main_seg_eval.ZS_MODEL and det['ckpt'] == 'zero_shot' and det['summary']['IoU'] == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize('broken', ['unexpected_key', 'wrong_detector'])
+def test_a_broken_run_fails_before_the_first_frame(synthetic_root, tmp_path, monkeypatch, broken):
+    '''Every run's front end and checkpoint are checked up front: a bad last run must not cost the passes before it.'''
+    root, det_ckpt, roi_dir = _setup(synthetic_root, tmp_path, monkeypatch)
+    monkeypatch.setattr(main_seg_eval, 'build_seg_model', lambda a, n_in, P, q: BoxEcho(n_in))
+    _write_run(tmp_path, 'r_s0', 'raw', 0, det_ckpt)
+    if broken == 'unexpected_key':
+        _write_run(tmp_path, 'r_s1', 'raw', 1, det_ckpt)
+        path = tmp_path / 'weights' / 'r_s1' / 'model_best'
+        ck = torch.load(path, map_location='cpu', weights_only=False)
+        ck['model']['stray.weight'] = torch.zeros(1)
+        torch.save(ck, path)
+        match = 'unexpected keys'
+    else:
+        _write_run(tmp_path, 'r_s1', 'ec10', 1, det_ckpt)                        # an EC arm on the raw-band detector
+        match = 'needs an EC detector'
+    frames = []
+    monkeypatch.setattr(main_seg_eval, 'evaluate_frame', lambda spec, oracle, det, gt, name, device, args: frames.append(name))
+    with pytest.raises(AssertionError, match=match):
+        main_seg_eval.main(_eval_args(root, tmp_path, roi_dir, '--runs', 'r_s0', 'r_s1', '--runs_per_pass', '1'))
+    assert frames == [] and not (tmp_path / 'seg' / 'r_s0').exists()            # no pass ran, nothing written
 
 
 def test_missing_roi_export_raises(synthetic_root, tmp_path, monkeypatch):
