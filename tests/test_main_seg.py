@@ -144,13 +144,34 @@ def test_dry_run_checks_one_batch_per_box_source_and_writes_nothing(synthetic_ro
     assert not (tmp_path / 'seg').exists()
 
 
+def _crash_at(monkeypatch):
+    '''Make train_one_epoch raise at epoch crash['at'] (an interrupted run); crash['at'] = None disarms it.'''
+    crash = {'at': None}
+    train = main_seg.train_one_epoch
+
+    def crashing(model, front_end, loader, optimizer, device, epoch, **kw):
+        if epoch == crash['at']:
+            raise RuntimeError(f'simulated crash in epoch {epoch}')
+        return train(model, front_end, loader, optimizer, device, epoch, **kw)
+    monkeypatch.setattr(main_seg, 'train_one_epoch', crashing)
+    return crash
+
+
+def _lines(path):
+    return [json.loads(l) for l in path.read_text().strip().splitlines()]
+
+
 def test_main_seg_trains_resumes_and_evaluates(synthetic_root, tmp_path, monkeypatch):
     root, _, _ = synthetic_root
     det, built = _setup(root, tmp_path, monkeypatch)
+    crash = _crash_at(monkeypatch)
     out = tmp_path / 'seg'
-    main_seg.main(_args(root, tmp_path, det, '--epochs', '2'))
-    lines = [json.loads(l) for l in (out / 'results_tseg.txt').read_text().strip().splitlines()]
-    assert [l['epoch'] for l in lines[:2]] == [0, 1] and lines[-1]['final'] is True and len(lines) == 3
+    crash['at'] = 2                                                                # a 3-epoch run interrupted in epoch 2
+    with pytest.raises(RuntimeError, match='simulated crash'):
+        main_seg.main(_args(root, tmp_path, det, '--epochs', '3'))
+    crash['at'] = None
+    lines = _lines(out / 'results_tseg.txt')
+    assert [l['epoch'] for l in lines] == [0, 1] and not any(l.get('final') for l in lines)
     assert {'S', 'Fw', 'IoU', 'MAE', 'n'} <= set(lines[0]['val']) and lines[0]['val']['n'] == 4   # 2 oracle + 2 matched val ROIs
     assert {'loss', 'lr', 'main', 'side'} <= set(lines[0]['train'])
     ck = torch.load(out / 'model_last', map_location='cpu', weights_only=False)
@@ -158,20 +179,156 @@ def test_main_seg_trains_resumes_and_evaluates(synthetic_root, tmp_path, monkeyp
     assert ck['args']['arm'] == 'raw' and ck['args']['seg_model'] == 'sam2unet' and (out / 'model_best').exists()
     np.testing.assert_array_equal(ck['P'], built[0][1])
 
-    # resume: one more epoch from model_last with the stored stem fold (no refit) and the best score carried over
+    # resume: the last epoch from model_last with the stored stem fold (no refit) and the best score carried over
     def no_refit(*a, **k):
         raise AssertionError('a resumed run must reuse the stored (P, q)')
     monkeypatch.setattr(main_seg, 'fit_arm_rgb_map', no_refit)
     main_seg.main(_args(root, tmp_path, det, '--epochs', '3', '--resume', str(out / 'model_last')))
-    lines = [json.loads(l) for l in (out / 'results_tseg.txt').read_text().strip().splitlines()]
-    assert lines[-2]['epoch'] == 2 and lines[-2]['best'] >= lines[1]['best'] and lines[-1]['final'] is True
+    lines = _lines(out / 'results_tseg.txt')
+    assert [l['epoch'] for l in lines[:-1]] == [0, 1, 2] and lines[-1]['final'] is True
+    assert lines[-2]['best'] >= lines[1]['best']
     np.testing.assert_array_equal(built[1][1], built[0][1])
     with pytest.raises(AssertionError, match='seg_model'):                         # another model's checkpoint
-        main_seg.main(_args(root, tmp_path, det, '--seg_model', 'zoomnext', '--resume', str(out / 'model_last')))
+        main_seg.main(_args(root, tmp_path, det, '--seg_model', 'zoomnext', '--epochs', '3', '--resume', str(out / 'model_last')))
 
     main_seg.main(_args(root, tmp_path, det, '--resume', str(out / 'model_best'), '--eval'))
     last = json.loads((out / 'results_tseg.txt').read_text().strip().splitlines()[-1])
     assert last['eval'] is True and 'S' in last['val'] and last['val']['n'] == 4
+
+
+def test_fresh_start_moves_a_previous_attempt_aside(synthetic_root, tmp_path, monkeypatch):
+    root, _, _ = synthetic_root
+    det, _ = _setup(root, tmp_path, monkeypatch)
+    crash = _crash_at(monkeypatch)
+    out, tb = tmp_path / 'seg', tmp_path / 'runs' / 'tseg'
+    crash['at'] = 1                                                                # attempt 1 dies in epoch 1
+    with pytest.raises(RuntimeError, match='simulated crash'):
+        main_seg.main(_args(root, tmp_path, det, '--epochs', '2'))
+    crash['at'] = None
+    first = (out / 'results_tseg.txt').read_text()
+    old_events = sorted(p.name for p in tb.iterdir())
+    assert len(_lines(out / 'results_tseg.txt')) == 1 and old_events
+    (tmp_path / 'runs' / 'tseg.prev').mkdir()                                      # an older .prev is replaced
+    (tmp_path / 'runs' / 'tseg.prev' / 'older').write_text('x')
+    (out / 'results_tseg.txt.prev').write_text('older\n')
+
+    main_seg.main(_args(root, tmp_path, det, '--epochs', '1', '--dry_run'))        # a dry run moves nothing
+    assert (out / 'results_tseg.txt').read_text() == first and (out / 'model_last').exists()
+
+    main_seg.main(_args(root, tmp_path, det, '--epochs', '2'))                     # attempt 2, from epoch 0
+    lines = _lines(out / 'results_tseg.txt')
+    assert [l['epoch'] for l in lines[:-1]] == [0, 1] and lines[-1]['final'] is True   # no line of attempt 1
+    assert (out / 'results_tseg.txt.prev').read_text() == first
+    assert sorted(p.name for p in (tmp_path / 'runs' / 'tseg.prev').iterdir()) == old_events
+    assert set(p.name for p in tb.iterdir()).isdisjoint(old_events)                # new TensorBoard events only
+    prev_last = torch.load(out / 'model_last.prev', map_location='cpu', weights_only=False)
+    assert prev_last['epoch'] == 0 and (out / 'model_best.prev').exists()          # attempt 1's checkpoints, aside
+
+    n = len(_lines(out / 'results_tseg.txt'))                                      # --eval appends, moves nothing
+    main_seg.main(_args(root, tmp_path, det, '--epochs', '2', '--resume', str(out / 'model_best'), '--eval'))
+    assert len(_lines(out / 'results_tseg.txt')) == n + 1 and (out / 'model_last').exists()
+
+
+def test_checkpoint_save_is_atomic(tmp_path, monkeypatch):
+    model = TinySeg(4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda e: 1.0)
+    args = main_seg.get_args_parser().parse_args([])
+    P, q = np.ones((3, 4), np.float32), np.zeros(3, np.float32)
+    path = str(tmp_path / 'model_last')
+    main_seg.save_checkpoint(path, model, optimizer, None, scheduler, 3, args, 0.5, 2, P, q)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['model_last']             # no .tmp left behind
+    ck = torch.load(path, map_location='cpu', weights_only=False)
+    assert (ck['epoch'], ck['best'], ck['best_epoch'], ck['n_in']) == (3, 0.5, 2, 4)
+
+    # a save that dies mid-write leaves the previous checkpoint intact
+    real_save = torch.save
+
+    def dying_save(obj, f, *a, **k):
+        with open(f, 'wb') as fh:
+            fh.write(b'PK truncated')
+        raise OSError('disk full')
+    monkeypatch.setattr(torch, 'save', dying_save)
+    with pytest.raises(OSError, match='disk full'):
+        main_seg.save_checkpoint(path, model, optimizer, None, scheduler, 4, args, 0.6, 4, P, q)
+    monkeypatch.setattr(torch, 'save', real_save)
+    assert torch.load(path, map_location='cpu', weights_only=False)['epoch'] == 3
+
+
+def test_resume_drops_later_lines_and_keeps_a_later_model_best(synthetic_root, tmp_path, monkeypatch):
+    root, _, _ = synthetic_root
+    det, _ = _setup(root, tmp_path, monkeypatch)
+    out = tmp_path / 'seg'
+    # keep a copy of model_last as saved after epoch 0, then let the run go on to the end
+    save, kept = main_seg.save_checkpoint, {}
+
+    def save_and_keep(path, *a):
+        save(path, *a)
+        if path.endswith('model_last') and a[4] == 0:                              # a[4] = epoch
+            kept['e0'] = torch.load(path, map_location='cpu', weights_only=False)
+    monkeypatch.setattr(main_seg, 'save_checkpoint', save_and_keep)
+    main_seg.main(_args(root, tmp_path, det, '--epochs', '3'))
+    main_seg.main(_args(root, tmp_path, det, '--epochs', '3', '--resume', str(out / 'model_best'), '--eval'))
+    # the interrupted state: model_last of epoch 0, results lines of epochs 0-2 + final + an --eval line + a cut line, and
+    # a model_best saved after epoch 0 whose score no later epoch can beat
+    torch.save(kept['e0'], out / 'model_last')
+    best = torch.load(out / 'model_best', map_location='cpu', weights_only=False)
+    best.update(epoch=2, best=2.0, best_epoch=2)
+    torch.save(best, out / 'model_best')
+    with open(out / 'results_tseg.txt', 'a') as f:
+        f.write('{"epoch": 3, "train": {"lo')
+    before = (out / 'results_tseg.txt').read_text().splitlines()
+    assert [json.loads(l).get('epoch') for l in before[:3]] == [0, 1, 2] and '"final": true' in before[3] and '"eval": true' in before[4]
+
+    main_seg.main(_args(root, tmp_path, det, '--epochs', '3', '--resume', str(out / 'model_last')))
+    after = (out / 'results_tseg.txt').read_text().splitlines()
+    assert after[:2] == [before[0], before[4]]                                     # epoch 0 and the --eval line kept, in order
+    lines = [json.loads(l) for l in after]
+    assert [l.get('epoch') for l in lines[2:4]] == [1, 2] and not lines[2].get('final') and lines[-1]['final'] is True
+    assert sum(1 for l in lines if l.get('final')) == 1 and len(lines) == 5        # epochs 1, 2 re-run once, one final line
+    assert all((l['best'], l['best_epoch']) == (2.0, 2) for l in lines[2:4])       # seeded from the later model_best
+    assert lines[-1]['best'] == 2.0 and lines[-1]['best_epoch'] == 2
+    on_disk = torch.load(out / 'model_best', map_location='cpu', weights_only=False)
+    assert (on_disk['epoch'], on_disk['best']) == (2, 2.0)                         # never overwritten by a worse epoch
+    assert not list(out.glob('*.tmp'))
+
+
+def test_resume_must_continue_the_same_run(synthetic_root, tmp_path, monkeypatch):
+    root, _, _ = synthetic_root
+    det, _ = _setup(root, tmp_path, monkeypatch)
+    out = tmp_path / 'seg'
+    main_seg.main(_args(root, tmp_path, det, '--epochs', '1'))
+    last = str(out / 'model_last')
+    for flags, what in ((('--seed', '1'), 'seed'), (('--canvas', '64'), 'canvas'), (('--epochs', '5'), 'epochs'),
+                        (('--arm', 'rgb'), 'arm')):
+        with pytest.raises(AssertionError, match=what):
+            main_seg.main(_args(root, tmp_path, det, '--epochs', '1', '--resume', last, *flags))
+    # another detector's run (its front end and ROIs): the checkpoint names the detector folder
+    ck = torch.load(last, map_location='cpu', weights_only=False)
+    ck['args']['det_ckpt'] = '/elsewhere/sel10g_clean_A/model_best'
+    torch.save(ck, tmp_path / 'other_last')
+    with pytest.raises(AssertionError, match='detector sel10g_clean_A'):
+        main_seg.main(_args(root, tmp_path, det, '--epochs', '1', '--resume', str(tmp_path / 'other_last')))
+    # --epochs only matters for training: evaluating the checkpoint with another --epochs is fine
+    main_seg.main(_args(root, tmp_path, det, '--epochs', '5', '--resume', last, '--eval'))
+    assert _lines(out / 'results_tseg.txt')[-1]['eval'] is True
+
+
+def test_loaders_keep_their_workers_between_epochs(synthetic_root, tmp_path, monkeypatch):
+    root, _, _ = synthetic_root
+    det, _ = _setup(root, tmp_path, monkeypatch)
+    made, real = [], torch.utils.data.DataLoader
+
+    def spy(*a, **k):
+        made.append(real(*a, **k))
+        return made[-1]
+    monkeypatch.setattr(torch.utils.data, 'DataLoader', spy)
+    main_seg.main(_args(root, tmp_path, det, '--dry_run', '--num_workers', '2'))
+    train, val = [d for d in made if d.batch_size == 4][:2]                       # the stem fit's loader has batch 1
+    assert train.drop_last and not val.drop_last and train.persistent_workers and val.persistent_workers
+    made.clear()
+    main_seg.main(_args(root, tmp_path, det, '--dry_run'))                          # --num_workers 0: no workers to keep
+    assert not any(d.persistent_workers for d in made)
 
 
 class PairSeg(TinySeg):

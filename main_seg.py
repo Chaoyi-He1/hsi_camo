@@ -13,6 +13,9 @@ Continue a run, or evaluate a checkpoint on the val ROIs:
   python main_seg.py --seg_model sam2unet --arm ec10 --det_ckpt weights/sel10g_clean_A/model_best --resume weights/seg_sam2unet_ec10_s0/model_last
   python main_seg.py --seg_model sam2unet --arm ec10 --det_ckpt weights/sel10g_clean_A/model_best --resume weights/seg_sam2unet_ec10_s0/model_best --eval
 Flags left at None come from --hpy cfg/seg.yaml (common keys, then the --seg_model section); explicit flags win.
+A resumed or evaluated checkpoint must be this run's (model, arm, detector folder, seed, canvas; --epochs too when training
+continues). Resuming drops the results lines written after the checkpoint and keeps a later on-disk model_best; a fresh
+start (no --resume / --eval) moves a previous attempt's results file, TensorBoard dir and checkpoints to <path>.prev.
 Spec §9 checks: the detector must be the arm's (check_arm), its filter bank is rebuilt bit-identically (build_front_end with
 the checkpoint's state), and the crop cache must hold that detector's ROIs and band window.
 Without torchrun this script pins CUDA_VISIBLE_DEVICES=0 unless it is already set (as main_det does); one job per GPU.
@@ -26,6 +29,7 @@ import datetime
 import json
 import math
 import random
+import shutil
 import time
 
 import yaml
@@ -135,8 +139,13 @@ def det_args_from_ckpt(det_ckpt, args):
     assert 'args' in ckpt and 'model' in ckpt, f"{det_ckpt} is not a main_det checkpoint (keys {sorted(ckpt)})"
     det_args = main_det_rois.detector_args(ckpt['args'], argparse.Namespace(data_path=args.data_path, cache_dir=args.cache_dir,
                                                                             device=args.device))
-    det_args.name = os.path.basename(os.path.dirname(os.path.abspath(det_ckpt)))
+    det_args.name = det_run_of(det_ckpt)
     return det_args, ckpt
+
+
+def det_run_of(det_ckpt):
+    '''The detector run of a checkpoint path: its folder name (weights/sel10g_clean_A/model_best -> sel10g_clean_A).'''
+    return os.path.basename(os.path.dirname(os.path.abspath(det_ckpt)))
 
 
 def check_arm(arm, det_args):
@@ -208,11 +217,102 @@ def val_score(summary):
 
 
 def save_checkpoint(path, model, optimizer, scaler, scheduler, epoch, args, best, best_epoch, P, q):
-    '''Full model state (frozen trunk included, so a checkpoint needs no pretrained file to load) + optimiser state + the stem fold.'''
-    utils.save_on_master({'model': model.state_dict(), 'optimizer': optimizer.state_dict() if optimizer else None,
-                          'scaler': scaler.state_dict() if scaler else None, 'lr_scheduler': scheduler.state_dict() if scheduler else None,
-                          'epoch': epoch, 'args': vars(args), 'best': float(best), 'best_epoch': int(best_epoch),
-                          'P': np.asarray(P, np.float32), 'q': np.asarray(q, np.float32), 'n_in': int(np.shape(P)[1])}, path)
+    '''
+    Full model state (frozen trunk included, so a checkpoint needs no pretrained file to load) + optimiser state + the stem
+    fold. Written to <path>.tmp in the same directory, then os.replace'd over path: a crash or a full disk mid-write
+    leaves the previous model_best / model_last intact, never a truncated file (the queue resumes from model_last).
+    '''
+    if not utils.is_main_process():
+        return
+    tmp = path + '.tmp'
+    torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict() if optimizer else None,
+                'scaler': scaler.state_dict() if scaler else None, 'lr_scheduler': scheduler.state_dict() if scheduler else None,
+                'epoch': epoch, 'args': vars(args), 'best': float(best), 'best_epoch': int(best_epoch),
+                'P': np.asarray(P, np.float32), 'q': np.asarray(q, np.float32), 'n_in': int(np.shape(P)[1])}, tmp)
+    os.replace(tmp, path)
+
+
+def check_ckpt_args(ckpt_args, args, path, train=True):
+    '''
+    A checkpoint this run continues (--resume) or evaluates (--eval) must be this run's: same seg_model, arm, seed, canvas
+    and detector run (the folder of --det_ckpt: the front end and the ROIs the model was trained on); continuing its
+    training (train=True) also needs the same --epochs, which the cosine schedule and ZoomNeXt's loss ramp depend on.
+    '''
+    for k in ('seg_model', 'arm', 'seed', 'canvas') + (('epochs',) if train else ()):
+        assert ckpt_args.get(k) == getattr(args, k), f"{path} is a {k}={ckpt_args.get(k)!r} run, not {getattr(args, k)!r} (--{k})"
+    det, want = det_run_of(ckpt_args.get('det_ckpt') or ''), det_run_of(args.det_ckpt)
+    assert det == want, \
+        f"{path} was trained with detector {det} ({ckpt_args.get('det_ckpt')!r}), this run uses {want} (--det_ckpt {args.det_ckpt})"
+
+
+def move_aside(paths):
+    '''
+    Fresh start (neither --resume nor --eval): every existing file or directory of paths (a previous attempt's results
+    file, TensorBoard dir, model_best / model_last) is moved to <path>.prev, replacing an older .prev. So a restarted run
+    never appends to a crashed run's lines or events, and a stale model_last can never be resumed into the new run.
+    Returns the paths moved.
+    '''
+    moved = []
+    for p in paths:
+        if not os.path.lexists(p):
+            continue
+        prev = p + '.prev'
+        if os.path.isdir(prev) and not os.path.islink(prev):
+            shutil.rmtree(prev)
+        elif os.path.lexists(prev):
+            os.remove(prev)
+        os.replace(p, prev)
+        moved.append(p)
+    return moved
+
+
+def truncate_results(path, last_epoch):
+    '''
+    Resume after epoch last_epoch (the checkpoint's): rewrite results_<name>.txt atomically (<path>.tmp + os.replace),
+    keeping, in order,
+      - the per-epoch lines of epochs <= last_epoch: the history the checkpoint continues;
+      - every --eval line: it describes a checkpoint file, not the training history;
+    and dropping
+      - the per-epoch lines of later epochs: the interrupted run wrote them after its last checkpoint, they are re-run;
+      - every 'final' line: its 'epoch' is the best epoch, not a training epoch, so the epoch rule alone would keep it;
+        the resumed run writes its own at the end, and the queue treats a run with a final line as finished;
+      - an unreadable line (a write cut by the crash).
+    Returns the number of lines dropped.
+    '''
+    if not os.path.isfile(path):
+        return 0
+    with open(path) as f:
+        lines = [l for l in f.read().splitlines() if l.strip()]
+    keep = []
+    for l in lines:
+        try:
+            r = json.loads(l)
+        except json.JSONDecodeError:
+            continue
+        if r.get('eval') or (not r.get('final') and r.get('epoch') is not None and int(r['epoch']) <= last_epoch):
+            keep.append(l)
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as f:
+        f.write(''.join(l + '\n' for l in keep))
+    os.replace(tmp, path)
+    return len(lines) - len(keep)
+
+
+def later_best(args, last_epoch):
+    '''
+    (best, best_epoch) of <output_dir>/model_best when it was saved after epoch last_epoch, else None. The interrupted run
+    may have improved after its last model_last (saved every save_every epochs); resuming from the checkpoint's older best
+    would let the first epoch that beats that older score overwrite the better model_best. The file must be this run's
+    (check_ckpt_args); it is opened with mmap, so its tensors are not read.
+    '''
+    path = os.path.join(args.output_dir, 'model_best')
+    if not os.path.isfile(path):
+        return None
+    ckpt = torch.load(path, map_location='cpu', weights_only=False, mmap=True)
+    check_ckpt_args(ckpt['args'], args, path)
+    found = (float(ckpt['best']), int(ckpt['best_epoch'])) if int(ckpt['epoch']) > last_epoch else None
+    del ckpt
+    return found
 
 
 def dry_run(model, front_end, dataset, args, device, amp_dtype):
@@ -262,6 +362,7 @@ def dry_run(model, front_end, dataset, args, device, amp_dtype):
 
 
 def main(args):
+    # hyper-parameters: flags left at None come from --hpy (common keys, then the --seg_model section)
     cfg = load_cfg(args)
     args.name = args.name or f'seg_{args.seg_model}_{args.arm}_s{args.seed}'
     args.output_dir = args.output_dir or os.path.join('weights', args.name)
@@ -271,8 +372,11 @@ def main(args):
     assert args.amp_dtype in AMP_DTYPES, f"amp_dtype must be one of {sorted(AMP_DTYPES)}, got {args.amp_dtype!r}"
     amp_dtype = AMP_DTYPES[args.amp_dtype]
     device = torch.device(args.device if args.device == 'cpu' or torch.cuda.is_available() else 'cpu')
+
+    # set random seed
     torch.manual_seed(args.seed); np.random.seed(args.seed); random.seed(args.seed)
 
+    # arm front end = the detector's own (spec §9 checks), and the crop cache that must match it
     index_path = os.path.join(args.crop_cache, 'index.json')
     assert os.path.isfile(index_path), f"{index_path} not found: build the crop cache first (bash_files/launch_seg_queue.sh)"
     with open(index_path) as f:
@@ -289,31 +393,34 @@ def main(args):
             f"crop cache {args.crop_cache} holds the {roi_arm} ROIs of {p}, not of the arm's detector {det_args.name}"
     del index                                                                            # the windows are read by HyperCOD_roi
 
+    # create dataset and dataloader
     roi_kw = dict(roi_margin=args.roi_margin, roi_min=args.roi_min, canvas=args.canvas)
     dataset_train = HyperCOD_roi(args.crop_cache, 'train', args.arm, box_mix=tuple(args.box_mix), gt_jitter=args.gt_jitter,
                                  scale_aug=tuple(args.scale_aug), gain_aug=args.gain_aug, train=True, **roi_kw)
     dataset_val = HyperCOD_roi(args.crop_cache, 'val', args.arm, train=False, **roi_kw)
     assert len(dataset_train) > 0 and len(dataset_val) > 0, \
         f"empty split in {args.crop_cache}: {len(dataset_train)} train / {len(dataset_val)} val items"
-    # drop_last: ZoomNeXt's pooled BatchNorm refuses a training batch of one item (289 items % 4 == 1 in the real epoch)
+    # drop_last: ZoomNeXt's pooled BatchNorm refuses a training batch of one item, which an epoch's last batch can be
     assert len(dataset_train) >= args.batch_size, f"{len(dataset_train)} training items < batch {args.batch_size}"
     print(f"{args.crop_cache}: {len(dataset_train)} training items per epoch, {len(dataset_val)} val items, arm {args.arm}")
-    pin = device.type == 'cuda'
+    # persistent workers: re-spawning them for every epoch and val pass left the data wait at 41-48 % of a step
+    pin, keep = device.type == 'cuda', args.num_workers > 0
     loader_train = torch.utils.data.DataLoader(dataset_train, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
-                                               collate_fn=seg_collate_fn, pin_memory=pin, drop_last=True)
+                                               collate_fn=seg_collate_fn, pin_memory=pin, drop_last=True, persistent_workers=keep)
     loader_val = torch.utils.data.DataLoader(dataset_val, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
-                                             collate_fn=seg_collate_fn, pin_memory=pin, drop_last=False)
+                                             collate_fn=seg_collate_fn, pin_memory=pin, drop_last=False, persistent_workers=keep)
 
-    # stem fold (P, q): fitted once per run, or taken from the checkpoint being resumed / evaluated
+    # stem fold (P, q): fitted once per run, or taken from the checkpoint being resumed / evaluated (which must be this run's)
     ckpt = torch.load(args.resume, map_location='cpu', weights_only=False) if args.resume else None
     if ckpt is not None:
-        for k in ('seg_model', 'arm'):
-            assert ckpt['args'][k] == getattr(args, k), f"--resume {args.resume} is a {k}={ckpt['args'][k]!r} run, not {getattr(args, k)!r}"
+        check_ckpt_args(ckpt['args'], args, f"--resume {args.resume}", train=not args.eval)
         P, q = ckpt['P'], ckpt['q']
     else:
         dataset_fit = HyperCOD_roi(args.crop_cache, 'train', args.arm, train=False, **roi_kw)   # deterministic training items
         P, q, _ = fit_arm_rgb_map(front_end, dataset_fit, dataset.wavelens, device, n_pixels=args.fit_pixels,
                                   n_items=args.fit_items, seed=args.seed, num_workers=args.num_workers)
+
+    # build model
     n_in = front_end.n_out
     assert np.shape(P) == (3, n_in) and np.shape(q) == (3,), f"stem fold P {np.shape(P)} / q {np.shape(q)} for {n_in} arm channels"
     model = build_seg_model(args, n_in, P, q).to(device)
@@ -323,18 +430,28 @@ def main(args):
     n_all = sum(p.numel() for p in model.parameters())
     print(f"{args.seg_model} on arm {args.arm}: {n_in} + 1 input channels, {n_train / 1e6:.2f}M trainable of {n_all / 1e6:.1f}M parameters")
 
+    # optimizer and scheduler
     optimizer = torch.optim.AdamW(model.param_groups(args), lr=args.lr, weight_decay=args.weight_decay)
     lf = lambda x: ((1 + math.cos(x * math.pi / args.epochs)) / 2) * (1 - args.lrf) + args.lrf   # cosine per epoch, as main_det
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
     scaler = torch.amp.GradScaler('cuda') if device.type == 'cuda' and amp_dtype == torch.float16 else None   # bf16: none needed
 
+    # pre-flight only: one batch per box source, nothing written
     if args.dry_run:
         return dry_run(model, front_end, dataset_train, args, device, amp_dtype)
 
+    # output files: a fresh start moves a previous attempt's results / TensorBoard events / checkpoints to <path>.prev
+    results_path = os.path.join(args.output_dir, f'results_{args.name}.txt')
+    if not args.resume and not args.eval:
+        moved = move_aside([results_path, os.path.join(args.runs_dir, args.name),
+                            os.path.join(args.output_dir, 'model_best'), os.path.join(args.output_dir, 'model_last')])
+        if moved:
+            print(f"fresh start: moved a previous attempt to <path>.prev: {moved}")
     os.makedirs(args.output_dir, exist_ok=True)
     logger = TrainLogger(args, cfg)
-    results_path = os.path.join(args.output_dir, f'results_{args.name}.txt')
     eval_kw = dict(amp_dtype=amp_dtype, size_edges=tuple(args.size_edges))
+
+    # evaluate only
     if args.eval:
         assert ckpt is not None, "--eval needs --resume <main_seg checkpoint>"
         val = evaluate(model, front_end, loader_val, device, logger=logger, epoch=ckpt['epoch'], tag='val', **eval_kw)
@@ -343,14 +460,24 @@ def main(args):
         logger.finish()
         return results_path
 
+    # resume: optimizer / scheduler / epoch, the best score, and the results lines up to the checkpoint's epoch
     start_epoch, best, best_epoch = 0, -1.0, -1
     if ckpt is not None and ckpt.get('optimizer'):
         optimizer.load_state_dict(ckpt['optimizer']); scheduler.load_state_dict(ckpt['lr_scheduler'])
         if scaler is not None and ckpt.get('scaler'):
             scaler.load_state_dict(ckpt['scaler'])
-        # carry the best score over, or the first post-resume epoch would overwrite model_best with a worse model
+        # carry the best score over, or the first post-resume epoch would overwrite model_best with a worse model ...
         start_epoch, best, best_epoch = ckpt['epoch'] + 1, float(ckpt['best']), int(ckpt['best_epoch'])
+        # ... and a model_best the interrupted run saved after this checkpoint holds a better score still
+        later = later_best(args, ckpt['epoch'])
+        if later is not None:
+            print(f"model_best of epoch {later[1]} (score {later[0]:.4f}) is later than the checkpoint: kept as the best so far")
+            best, best_epoch = later
+    if ckpt is not None:
+        dropped = truncate_results(results_path, start_epoch - 1)
+        print(f"resume at epoch {start_epoch}: dropped {dropped} results line(s) (later epochs, final lines, cut lines)")
 
+    # train
     print(f"Start training from epoch {start_epoch}, best so far {best:.4f}"); start = time.time()
     val = None
     for epoch in range(start_epoch, args.epochs):
@@ -364,13 +491,14 @@ def main(args):
         if score > best:                                         # before model_last, so model_best includes this epoch
             best, best_epoch = score, epoch
             save_checkpoint(os.path.join(args.output_dir, 'model_best'), model, optimizer, scaler, scheduler, epoch, args, best, best_epoch, P, q)
-        if (epoch + 1) % args.save_every == 0 or epoch + 1 == args.epochs:
-            save_checkpoint(os.path.join(args.output_dir, 'model_last'), model, optimizer, scaler, scheduler, epoch, args, best, best_epoch, P, q)
+        # the epoch's line before model_last: a crash between the two leaves a line that the resume drops, never a gap
         with open(results_path, 'a') as f:
             f.write(json.dumps({'epoch': epoch, 'train': train_stats, 'val': val, 'score': score, 'best': best, 'best_epoch': best_epoch}) + '\n')
+        if (epoch + 1) % args.save_every == 0 or epoch + 1 == args.epochs:
+            save_checkpoint(os.path.join(args.output_dir, 'model_last'), model, optimizer, scaler, scheduler, epoch, args, best, best_epoch, P, q)
     print(f"Training time {datetime.timedelta(seconds=int(time.time() - start))}, best val mean(S, Fw) {best:.4f} at epoch {best_epoch}")
 
-    # model_best re-evaluated after a reload (checks the checkpoint round trip); the queue skips runs with this final line
+    # final: model_best re-evaluated after a reload (checks the checkpoint round trip); the queue skips runs with this line
     best_ckpt = torch.load(os.path.join(args.output_dir, 'model_best'), map_location='cpu', weights_only=False)
     model.load_state_dict(best_ckpt['model'])
     val_best = evaluate(model, front_end, loader_val, device, logger=logger, epoch=args.epochs, tag='val_best', **eval_kw)
