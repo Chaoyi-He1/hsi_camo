@@ -6,7 +6,8 @@
 #   seg_sam2unet_rgb_s<seed> (pseudo-RGB input, raw133_A's boxes; CONTROL_SEEDS, default 0); the zero-shot SAM2.1 box
 #   control needs no training and is evaluated by main_seg_eval --zero_shot.
 #   bash bash_files/launch_seg_queue.sh    # detached; queue log logs/seg_queue.log, run logs logs/<run>.log,
-#                                          # crop cache logs/seg_crop_cache.log, evaluation logs/seg_eval.log
+#                                          # crop cache logs/seg_crop_cache.log, evaluation logs/seg_eval.log (model_last:
+#                                          # logs/seg_eval_last.log)
 # Prerequisites: bash_files/setup_third_party.sh (sam2, pysodmetrics, ZoomNeXt, weights/pretrained/*) and
 # bash_files/launch_rois_all.sh (results/det/rois_<det>_{train,val,test}.json of raw133_A, sel10g_clean_A, sel24g_clean_A).
 # The crop cache is built only when <CROP_CACHE>/index.json is missing. A run with a 'final' line in
@@ -111,6 +112,7 @@ rc=$?
 echo "$(date) evaluation exit $rc -> results/seg/compare.json"
 if [ -n "${EVAL_LAST:-}" ]; then
   "$PY" -u main_seg_eval.py --runs "${DONE[@]}" --ckpt model_last --data_path "$DATA_PATH" --out_dir results/seg_last > logs/seg_eval_last.log 2>&1
-  echo "$(date) model_last evaluation exit $? -> results/seg_last/compare.json"
+  rc=$?
+  echo "$(date) model_last evaluation exit $rc -> results/seg_last/compare.json"
 fi
 echo "$(date) queue done"
