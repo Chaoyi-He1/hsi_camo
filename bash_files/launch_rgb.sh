@@ -9,12 +9,12 @@
 #                                          -> results/det/compare_rgb, log logs/compare_rgb.log
 #   bash bash_files/launch_rgb.sh          # detached; queue log logs/rgb_queue.log
 # A 'final' line in weights/rgb_A/results_rgb_A.txt skips the training (the comparison still runs), so it can be relaunched after
-# a crash of the comparison; an interrupted training restarts from epoch 0. PY, GPU (0) and NUM_WORKERS (6) are overridable. One
+# a crash of the comparison; an interrupted training restarts from epoch 0. PY, CUDA_VISIBLE_DEVICES (0) and NUM_WORKERS (6) are overridable. One
 # full-resolution job fits on the box: do not start another training meanwhile.
 SELF=$(readlink -f "$0")
 cd "$(dirname "$SELF")/.." || exit 1
 PY=${PY:-/home/grads/c/chaoyi_he/Desktop/conda/envs/hsi_camo/bin/python}
-export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=${GPU:-0}
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 mkdir -p logs weights/rgb_A
 if [ -z "${RGB_QUEUE_CHILD:-}" ]; then
   RGB_QUEUE_CHILD=1 setsid nohup bash "$SELF" "$@" > logs/rgb_queue.log 2>&1 < /dev/null &
@@ -38,4 +38,6 @@ fi
 echo "$(date) comparison: rgb_A + raw133_A + sel10g_clean_A + sel24g_clean_A + pca11_A on model_59..99"
 "$PY" -u main_det_compare.py --runs rgb_A raw133_A sel10g_clean_A sel24g_clean_A pca11_A --conditions clean \
     --out_dir results/det/compare_rgb --num_workers "${NUM_WORKERS:-6}" > logs/compare_rgb.log 2>&1 < /dev/null
-echo "$(date) done, compare exit $?"
+rc=$?
+echo "$(date) done, compare exit $rc"
+exit "$rc"

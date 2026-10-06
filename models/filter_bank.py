@@ -208,7 +208,7 @@ def assert_rgb_compatible(args):
     assert k == 0, f"--rgb_images has no EC responses to whiten, it cannot be combined with --pca-channels {k}"
     noise_db = float(getattr(args, 'read_noise_db', 0.0) or 0.0)
     assert noise_db == 0.0, f"--rgb_images is the noise-free camera baseline, it cannot be combined with --read_noise_db {noise_db:g}"
-    assert args.session == 'A', "--rgb_images has no gate to rank and no channels to slice, it cannot be combined with session B (--session A)"
+    assert args.session == 'A', "--rgb_images has no gate to rank and no channels to slice, it cannot be combined with session B: train it as session A"
 
 
 def rgb_filter_bank(args, dataset):

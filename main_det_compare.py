@@ -135,6 +135,8 @@ def main(args):
                                                   num_workers=args.num_workers, pin_memory=device.type == 'cuda',
                                                   collate_fn=partial(det_collate_fn, min_area=args.min_area)) for k in kinds}
         loader = loaders[kinds[0]]
+        sizes = {('RGB' if k else 'cube'): len(l) for k, l in loaders.items()}
+        assert len(set(sizes.values())) == 1, f"{split}: the cube and RGB loaders differ in length {sizes}; zip would drop the extra frames"
         for m in models.values():
             m['model'].eval()  # restarts every bank's eval-noise sequence: the same draws as the run's own validation pass
         stats, names, t0 = {}, [], time.time()

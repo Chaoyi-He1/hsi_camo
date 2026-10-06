@@ -349,5 +349,15 @@ def test_compare_gives_every_run_its_own_input(rgb_run, tmp_path, monkeypatch):
     np.testing.assert_equal(alone['test']['rgb_A/model_0|clean'], results['test']['rgb_A/model_0|clean'])
     cube_only, _ = main_det_compare.main(main_det_compare.get_args_parser().parse_args(base + ['--runs', 'ec_A', '--out_dir', str(tmp_path / 'cube_only')]))
     np.testing.assert_equal(cube_only['test']['ec_A/model_0|clean'], results['test']['ec_A/model_0|clean'])   # the cube run: the pre-RGB path
+    real = main_det.build_datasets
+    def _longer_rgb(a):                                                         # an RGB split with a repeated frame: zip would silently drop it
+        train, val, test = real(a)
+        if a.rgb_images:
+            test.img_name = test.img_name * 2
+        return train, val, test
+    monkeypatch.setattr(main_det, 'build_datasets', _longer_rgb)
+    with pytest.raises(AssertionError, match='differ in length'):
+        main_det_compare.main(main_det_compare.get_args_parser().parse_args(base + ['--runs', 'rgb_A', 'ec_A', '--out_dir', str(tmp_path / 'y')]))
+    monkeypatch.setattr(main_det, 'build_datasets', real)
     with pytest.raises(AssertionError, match='rgb_images'):                     # the input type is each run's own, not a comparison flag
         main_det_compare.main(main_det_compare.get_args_parser().parse_args(base + ['--runs', 'rgb_A', '--rgb_images', '--out_dir', str(tmp_path / 'x')]))
