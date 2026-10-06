@@ -1,5 +1,8 @@
 import hashlib
 import os
+import re
+import subprocess
+import sys
 import torch
 import torch.nn.functional as F
 
@@ -18,6 +21,8 @@ def test_vendored_sam2unet_carries_licence_and_notice():
     with open(os.path.join(VENDOR, 'NOTICE')) as f:
         notice = f.read()
     assert SAM2UNET_COMMIT in notice and 'Apache License 2.0' in notice and 'CHANGED (hsi_camo)' in notice
+    # the unmarked edits are listed too: the dropped `del model.<submodule>` lines, whitespace, the up4 comment
+    assert 'del model.' in notice and 'trailing whitespace' in notice and 'up4' in notice
     files = sorted(os.listdir(VENDOR))
     # SAM2-UNet's own `sam2` package copy must never be vendored (it shadows the pip sam2), nor any weights
     assert 'sam2' not in files and 'sam2_configs' not in files
@@ -48,3 +53,16 @@ def test_structure_loss_is_weighted_bce_plus_weighted_iou():
     assert abs(float(structure_loss(pred, mask)) - float(legacy)) > 1e-3
     good = (mask * 2 - 1) * 20                                                              # confident and right
     assert float(structure_loss(good, mask)) < 0.05 < float(structure_loss(-good, mask))
+
+
+def test_setup_versions_guard_covers_torchvision():
+    '''setup_third_party.sh's versions() guard (compared before / after the installs) reports numpy, cv2, torch and torchvision.'''
+    import cv2
+    import numpy
+    import torchvision
+    with open(os.path.join(REPO, 'bash_files', 'setup_third_party.sh')) as f:
+        line = next(l for l in f.read().splitlines() if re.match(r'versions\(\)\s*\{', l))
+    out = subprocess.run(['bash', '-c', f'{line}\nversions'], env={**os.environ, 'PY': sys.executable, 'CUDA_VISIBLE_DEVICES': ''},
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.split() == [numpy.__version__, cv2.__version__, torch.__version__, torchvision.__version__]

@@ -29,6 +29,9 @@ Changes made by hsi_camo (2026-10-04), each marked "# CHANGED (hsi_camo)" in sam
     Here reduction='none' (the weighted BCE the loss is written for); structure_loss(..., legacy_bce=True)
     reproduces upstream's value.
  4. The `if __name__ == "__main__"` CUDA smoke test at the end of SAM2UNet.py is removed.
+ 5. Not marked in sam2unet.py: upstream __init__'s `del model.<submodule>` lines (deleting every SAM2 part but the
+    image-encoder trunk) are gone, subsumed by build_hiera_trunk, which keeps only the trunk; trailing whitespace is
+    stripped; the `up4` line carries an added comment ("unused upstream as well").
 
 How hsi_camo uses it (models/seg_models.py, SAM2UNetSeg), deliberate departures from the upstream recipe:
  - the trunk's 3-channel patch-embed conv is replaced by an (N + 1)-channel stem folded from it

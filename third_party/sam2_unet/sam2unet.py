@@ -1,6 +1,7 @@
 # Vendored from https://github.com/WZH0120/SAM2-UNet at commit 01598e5e9912ffb23f965ecbebf4d1dfecbaa56e
 # (SAM2UNet.py, plus structure_loss from train.py). Licensed under the Apache License 2.0, see LICENSE in this
-# directory. Modified for hsi_camo; every change is listed in NOTICE and marked "# CHANGED (hsi_camo)" below.
+# directory. Modified for hsi_camo; every change is listed in NOTICE, every code change is marked "# CHANGED (hsi_camo)"
+# below (NOTICE item 5 lists the deletions and cosmetic edits that have no marker).
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

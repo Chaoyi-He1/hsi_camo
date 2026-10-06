@@ -15,7 +15,8 @@
 #   5. checkpoints into weights/pretrained/ (git-ignored): SAM2 v1 Hiera-L (SAM2-UNet starts from v1, not 2.1),
 #      SAM2.1 Hiera-L (box-prompted model), ZoomNeXt PVTv2-B2 COD (Google Drive). No ImageNet PVTv2 weights: the COD
 #      checkpoint holds the whole encoder.
-#   6. verification on CPU: imports, numpy / cv2 / torch versions unchanged, every checkpoint strict-loads into its model.
+#   6. verification on CPU: imports, numpy / cv2 / torch / torchvision versions unchanged, every checkpoint strict-loads
+#      into its model.
 #   bash bash_files/setup_third_party.sh       # foreground, about 2 GB of downloads
 # PY is overridable. Afterwards `pip check` reports three unmet pins: pysodmetrics' numpy<2.3.5 and
 # opencv-python-headless, and its scikit-image<0.26 (0.26.0 is pinned here; the metrics match py_sod_metrics to 1e-12).
@@ -29,9 +30,9 @@ ZOOMNEXT_DRIVE_ID=1_h8XZPDtXMKYUDP2r3MIjLp80eQ1LVBB
 W=weights/pretrained
 mkdir -p "$W" third_party
 
-versions() { "$PY" -c 'import numpy, cv2, torch; print(numpy.__version__, cv2.__version__, torch.__version__)'; }
+versions() { "$PY" -c 'import numpy, cv2, torch, torchvision; print(numpy.__version__, cv2.__version__, torch.__version__, torchvision.__version__)'; }
 BEFORE=$(versions)
-echo "numpy / cv2 / torch before: $BEFORE"
+echo "numpy / cv2 / torch / torchvision before: $BEFORE"
 
 echo "[1/6] sam2 @ $SAM2_COMMIT + hydra-core 1.3.2"
 SAM2_BUILD_CUDA=0 "$PY" -m pip install -q --no-build-isolation --no-deps \
@@ -73,7 +74,7 @@ fetch "https://drive.usercontent.google.com/download?id=$ZOOMNEXT_DRIVE_ID&expor
 
 echo "[6/6] verify (CPU)"
 AFTER=$(versions)
-[ "$AFTER" = "$BEFORE" ] || { echo "numpy / cv2 / torch changed: $BEFORE -> $AFTER"; exit 1; }
+[ "$AFTER" = "$BEFORE" ] || { echo "numpy / cv2 / torch / torchvision changed: $BEFORE -> $AFTER"; exit 1; }
 CUDA_VISIBLE_DEVICES="" "$PY" - <<'EOF'
 import sys
 import contextlib
