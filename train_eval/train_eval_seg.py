@@ -86,12 +86,13 @@ def train_one_epoch(model, front_end, data_loader, optimizer, device, epoch, sca
                 optimizer.step()
             optimizer.zero_grad(set_to_none=True)
         lr = optimizer.param_groups[0]['lr']
-        metric_logger.update(loss=float(total.detach()), lr=lr, **{k: float(v) for k, v in items.items()})
+        # one merged dict: the explicit total and lr win over same-named loss items (SAM2UNetSeg's items hold a 'loss' too)
+        scalars = {**{k: float(v) for k, v in items.items()}, 'loss': float(total.detach()), 'lr': lr}
+        metric_logger.update(**scalars)
         if logger is not None:
             # every AdamW group's lr under its name (param_groups(args) names them, e.g. stem / lora / decoder)
             lrs = {f"lr_{g.get('name', k)}": g['lr'] for k, g in enumerate(optimizer.param_groups)}
-            logger.scalars({'loss': float(total.detach()), 'lr': lr, **lrs, **{k: float(v) for k, v in items.items()}},
-                           epoch * n_steps + i, prefix='train/')
+            logger.scalars({**scalars, **lrs}, epoch * n_steps + i, prefix='train/')
     return {k: m.global_avg for k, m in metric_logger.meters.items()}
 
 

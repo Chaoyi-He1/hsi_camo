@@ -157,6 +157,44 @@ def test_train_one_epoch_accumulates_reports_progress_and_keeps_the_front_end_fi
     assert model.seen[0] == ((2, 5, C, C), (2, 4))
 
 
+class _ScalarLog:
+    '''Records logger.scalars calls ({name: value} per step), the only logger method train_one_epoch uses.'''
+
+    def __init__(self):
+        self.calls = []
+
+    def scalars(self, d, step, prefix=''):
+        self.calls.append((dict(d), step, prefix))
+
+
+class LossItemSeg(TinySeg):
+    '''TinySeg whose loss items carry a 'loss' key, like SAM2UNetSeg ({'loss_main', 'loss_s16', 'loss_s8', 'loss'}); item_loss
+    None = the key holds the total, a number = a stand-in that must lose against the explicitly logged total.'''
+
+    def __init__(self, n_in, item_loss=None):
+        super().__init__(n_in)
+        self.item_loss, self.totals = item_loss, []
+
+    def loss(self, outputs, mask):
+        total, items = super().loss(outputs, mask)
+        self.totals.append(float(total.detach()))
+        items['loss'] = float(total.detach()) if self.item_loss is None else self.item_loss
+        return total, items
+
+
+@pytest.mark.parametrize('item_loss', [None, 123.0])
+def test_train_one_epoch_survives_a_loss_item_named_loss_and_logs_the_total(item_loss):
+    items = [_item(20, 12, (2, 3, 8, 11), seed=k) for k in range(4)]
+    loader = torch.utils.data.DataLoader(items, batch_size=2, shuffle=False, collate_fn=seg_collate_fn)
+    model, log = LossItemSeg(4, item_loss), _ScalarLog()
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    stats = train_one_epoch(model, FixedFront(), loader, opt, torch.device('cpu'), epoch=0, logger=log, print_freq=1)   # was a TypeError
+    assert len(model.totals) == 2 and len(log.calls) == 2
+    assert stats['loss'] == pytest.approx(np.mean(model.totals))                   # the returned 'loss' is the total's average
+    assert [c[0]['loss'] for c in log.calls] == pytest.approx(model.totals)        # and so is every logged scalar
+    assert {'loss', 'lr', 'main', 'side'} <= set(stats)
+
+
 def test_train_one_epoch_stops_on_a_non_finite_loss():
     loader = torch.utils.data.DataLoader([_item(20, 12, (2, 3, 8, 11))], batch_size=1, collate_fn=seg_collate_fn)
     model = TinySeg(4, nan=True)
