@@ -89,9 +89,13 @@
 
 These are deliberate and are recorded here so that the spec does not have to be re-read against the code:
 
-- **Renamed / superseded signatures.** Spec §5.2 `match_rois(rois, gt_mask, labels, ids)` is `match_rois(rois, labels, ids, min_cover=0.01)`; the per-ROI index field `matched_object` is `object`. Spec §5.4 `build_seg_model(args, n_in)` / `forward(x, box_map, box_xyxy)` are `build_seg_model(args, n_in, P, q)` / `forward(x, box_xyxy)` (the box map is the last channel of `x`). Spec §5.5 `paste_back(prob_canvas, meta, H, W)` is `paste_back(prob_canvas, meta, out)` (max-merge into a caller-owned frame map).
+- **Renamed / superseded signatures.** Spec §5.2 `match_rois(rois, gt_mask, labels, ids)` is `match_rois(rois, labels, ids, min_cover=0.01)`; the per-ROI index field `matched_object` is `object`. Spec §5.4 `build_seg_model(args, n_in)` / `forward(x, box_map, box_xyxy)` are `build_seg_model(args, n_in, P, q)` / `forward(x, box_xyxy)` (the box map is the last channel of `x`). Spec §5.5 `paste_back(prob_canvas, meta, H, W)` is `paste_back(prob_canvas, meta, out)` (max-merge into a caller-owned frame map). `build_crop_cache(data_path, out_dir, roi_files {arm: {split: path}}, splits, …)` replaces spec §5.2 `(data_path, splits, roi_files {arm: path}, out_dir, …)`; `HyperCOD_roi.__getitem__` returns a 5-tuple with `valid` where the spec has a 4-tuple; `train_one_epoch` / `evaluate` take `front_end` (spec §5.5 has no such argument); `detector_args` lets this run's data paths / device win over the checkpoint's (spec §5.1 says "the way `main_det_compare.load_checkpoint_model` does").
+- **Loss weights and thresholds are not in `cfg/seg.yaml`.** Spec §4 lists loss-weight and eval-threshold keys; there are none: the losses are fixed per model, and the 0.5 thresholds (IoU, false-mask rate) are fixed in `train_eval/seg_metrics.py`.
 - **Bootstrap.** Spec §5.6 "reusing `main_det_compare.bootstrap`": replaced by `train_eval.seg_metrics.bootstrap_seg`, because `main_det_compare.bootstrap` is hard-wired to BoxMetrics keys and pooling. It is a paired frame (cluster) bootstrap.
-- **Deviations from upstream recipes.** SAM2-UNet: AdamW weight decay 1e-4 (upstream 5e-4), 512 canvases (upstream 352), the structure loss with `reduction='none'` (upstream's `reduce='none'` silently computes the plain mean BCE; `legacy_bce=True` restores it; see the vendored NOTICE), biases / norms / stem without decay. ZoomNeXt: one lr 1e-4 for the whole network (`encoder_lr_mult` 1.0; upstream 0.1 for the encoder and Adam without decay), `patch_embed1` trained (upstream frozen). SAM2.1 + box: the IoU and object-score heads frozen, no object-score gating, `apply_postprocessing=False`.
+- **Deviations from upstream recipes.** SAM2-UNet: AdamW weight decay 1e-4 (upstream 5e-4), 512 canvases (upstream 352), the structure loss with `reduction='none'` (upstream's `reduce='none'` silently computes the plain mean BCE; `legacy_bce=True` restores it; see the vendored NOTICE), biases / norms / stem without decay. ZoomNeXt: one lr 1e-4 for the whole network (`encoder_lr_mult` 1.0; upstream 0.1 for the encoder and Adam without decay), `patch_embed1` trained (upstream frozen). SAM2.1 + box: the IoU and object-score heads frozen, no object-score gating, `apply_postprocessing=False`. SAM2BoxSeg and ZoomNeXtSeg apply AdamW weight decay 1e-4 to biases and norm weights too (only their stem group has decay 0), unlike SAM2UNetSeg's decay / no_decay split and Stage-1's optimizer; spec §7 fixes only "AdamW weight decay 1e-4", and ZoomNeXt's own recipe uses weight decay 0.
+- **Third-party installs.** Task 5 hand-installs pysodmetrics 1.6.2 (+ scikit-image 0.26.0 / scikit-learn 1.9.1) before Task 7's `setup_third_party.sh`, which repeats the same pins idempotently; `pip check` reports pysodmetrics' `numpy<2.3.5`, `opencv-python-headless` and `scikit-image<0.26` pins as unmet (expected: numpy stays 2.5.2).
+- **timm.** `setup_third_party.sh` also installs `timm==1.0.30` (ZoomNeXt's model code imports it; the plan's Tech Stack lists it but the original script did not install it).
+- **Frozen Stage-1 oracle in the tests.** `tests/test_filter_bank.py::_stage1_filter_bank` is an intentional frozen copy of the pre-refactor `ec_yolo.py` logic at commit 1a14827 (the bit-identity oracle of spec §10); never edit it together with `build_filter_bank`.
 - **Stem fallback** (spec §3, mean RGB kernel × 3/N): `models/seg_stem.mean_stem` exists and is tested, but no flag selects it; switching a model to it is a manual code change if the fold misbehaves.
 - **1024 canvas fallback for SAM2BoxSeg** (spec §11): `--canvas 1024` works in `main_seg.py` (the crop-cache windows are native resolution), but `main_seg_eval.py` requires one canvas per call: evaluate 1024 runs in a separate call with their own `--out_dir`; their compare.json does not cross-compare with the 512 runs.
 - **Size buckets.** At ROI level the bucket is the GT pixel count of the scored crop (the union of the GT inside the ROI); at full-frame levels (b) and (c) it is the GT pixel count of the whole frame (the union of all objects), not per object. `meta['area']` (the object's own area) is carried by `HyperCOD_roi` for a later per-object bucketing.
@@ -6653,3 +6657,37 @@ The evaluation of 29 runs makes 5 frame passes (about 3 min of reads each). It a
 
 ## Results
 
+Pre-flight outcomes of Task 14, run on 2026-10-05 from the worktree on GPU 0 (2x RTX A4500 20 GB), one job at a time. The queue itself (Step 12) is not launched yet. Pre-flights 1-5 passed; pre-flight 6 (smoke run) is BLOCKED by a bug in `train_eval/train_eval_seg.py` (below), so the epoch time and the 200-epoch projection are not measured yet.
+
+**Pre-flight 1, dependencies.** `import sam2, py_sod_metrics, einops, numpy, torch` prints `2.5.2 2.11.0+cu128`. `weights/pretrained/` holds `sam2_hiera_large.pt` (897,952,466 B), `sam2.1_hiera_large.pt` (898,083,611 B), `pvtv2-b2-zoomnext.pth` (113,020,474 B) and the Stage-1 `yolo26s.pt`.
+
+**Pre-flight 2, ROI exports** (`bash bash_files/launch_rois_all.sh`, 07:14-07:32 CDT, 17.7 min, all exports exit 0). Frame counts as expected (251 / 28 / 70) for every detector. The coverage printed by each export is `ROI coverage recall@0.99` (the fraction of GT objects whose box is covered by some exported ROI at 0.99):
+
+| detector (arm) | train (251 frames, 258 objects) | val (28 frames, 31 objects) | test (70 frames, 71 objects) |
+|---|---|---|---|
+| raw133_A (raw) | 0.872 | 0.839 | 0.775 |
+| sel10g_clean_A (ec10) | 0.926 | 0.806 | 0.817 |
+| sel24g_clean_A (ec24) | 0.845 | 0.806 | 0.746 |
+
+**Pre-flight 3, crop cache** (`CACHE_ONLY=1 bash bash_files/launch_seg_queue.sh`, 07:32:46-07:37:44 CDT, 5.0 min). `crop cache: 521 windows, 31.4 GB -> /data2/chaoyi/HyperCOD/Raw data/crop_cache_seg` (289 object windows + 232 false-positive windows; `du -sh` 30G = 29.2 GiB, which agrees). In the 25-50 GB band of spec §3. `free -g` after the build: total 125, used 5, free 15, buff/cache 105, **available 119** GB. The cache (31.4 GB) fits in the page cache with a wide margin (119 - 10 > 31.4), so the one-job-per-box rule of spec §7 is enough.
+
+**Pre-flight 4, dry runs** (flags `--batch_size` / `--accumulate` omitted: the values come from `cfg/seg.yaml models.*`; each exits 0, filter bank checked against the detector checkpoint, one batch from each of gt / det / fp, GPU 0 was otherwise idle):
+
+| run | input shape of each source (gt / det / fp) | batch | peak GPU memory | wall time |
+|---|---|---|---|---|
+| sam2unet / raw | (8, 134, 512, 512) | 8 | 11.97 GiB | 45 s |
+| sam2box / raw | (8, 134, 512, 512) | 8 | 10.90 GiB | 39 s |
+| zoomnext / raw | (4, 134, 512, 512) | 4 (x accumulate 2) | 10.98 GiB | 47 s |
+| sam2unet / ec24 | (8, 25, 512, 512) | 8 | 10.69 GiB | 28 s |
+
+All are below the 19 GiB budget, so no ZoomNeXt fallback was needed (`cfg/seg.yaml models.zoomnext` is unchanged: batch 4 x accumulate 2, no `grad_ckpt`). Items per epoch: 287 train items on every arm; val items 73 (raw), 67 (ec24), 69 (ec10). Logs `logs/preflight_dry_*.log`.
+
+**Pre-flight 5, zero-shot sanity** (`main_seg_eval.py --zero_shot --limit 10 --n_boot 10 --out_dir results/seg_preflight`, 25 s in total, 14 s for the 10-frame pass). Four files under `results/seg_preflight/zs_sam2box_rgb/` (`eval_roi_oracle.json`, `eval_full_oracle.json`, `eval_full_det.json`, `per_image.pkl`). Oracle-ROI (n = 11 objects): S 0.840, Fw 0.754, IoU 0.715 (medium bucket S 0.868, n 7; large bucket S 0.790, n 4). Full-frame oracle: S 0.924, IoU 0.784. Full-frame detector ROIs (arm rgb = raw133_A's test ROIs): S 0.851, Fw 0.683, IoU 0.647, `n_frames = 10`, **`n_frames_no_roi = 1`**, `n_det_rois = 12`, `n_fp_rois = 1`, false-mask rate 1.000 (one fp ROI, so not informative). Far from S 0.5 / IoU 0: the canvas geometry and the box prompt are right.
+
+**Pre-flight 6, smoke run: BLOCKED.** `main_seg.py --seg_model sam2unet --arm ec10 ... --epochs 1 --name smoke_seg --output_dir weights/smoke_seg` builds everything (front end, 287 train / 69 val items, stem fold R^2 [0.9271, 0.9566, 0.9913], 10 + 1 channel SAM2UNetSeg, 4.35M trainable) and then dies in the first training step after 25 s:
+```
+File "train_eval/train_eval_seg.py", line 89, in train_one_epoch
+    metric_logger.update(loss=float(total.detach()), lr=lr, **{k: float(v) for k, v in items.items()})
+TypeError: util.misc.MetricLogger.update() got multiple values for keyword argument 'loss'
+```
+Cause: `SAM2UNetSeg.loss` (`models/seg_models.py:191`) returns `items['loss'] = float(total.detach())` next to `loss_main` / `loss_s16` / `loss_s8`, and `train_one_epoch` passes `loss=` explicitly as well as `**items`. SAM2BoxSeg and ZoomNeXtSeg items have no `loss` key, so only SAM2-UNet runs (10 of the 28 queue runs: 9 + the rgb control) crash. `tests/test_train_eval_seg.py` uses a stub model whose items have no `loss` key, and the dry run never calls `train_one_epoch`, so neither caught it. The same dict-merge collision in the `logger.scalars({'loss': ..., **items})` call is silent (the later key wins, equal value). Pending: the fix (for example merging the dicts, `metric_logger.update(**{'loss': ..., 'lr': lr, **items})`, plus a regression test with a SAM2UNetSeg-shaped items dict), then the smoke run again; the epoch time and the 200-epoch projections (per run and for the 28-run queue) are filled in from that run.
