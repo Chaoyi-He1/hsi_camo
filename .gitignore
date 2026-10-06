@@ -11,3 +11,4 @@ runs/
 wandb/
 *.pt
 third_party/zoomnext/
+logs/*.lock
