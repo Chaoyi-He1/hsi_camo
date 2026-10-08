@@ -80,10 +80,11 @@ fi
 
 mkdir -p logs
 if [ -z "${SEG_QUEUE_CHILD:-}" ]; then
-  # refuse on the terminal, before a running queue's log would be truncated; the detached queue checks again for real
+  # refuse on the terminal, before a second queue would write into a running queue's log; the detached queue checks again
+  # for real. The log is appended to, so relaunches (extra seeds, a later evaluation) keep the earlier campaign's timeline.
   ( flock -n 9 ) 9> "$GPU_LOCK" || { echo "another seg queue holds GPU $CUDA_VISIBLE_DEVICES ($GPU_LOCK, log $QUEUE_LOG): not launched"; exit 1; }
   if why=$(gpu_busy); then echo "$why: not launched (FORCE_GPU=1 overrides)"; exit 1; fi
-  SEG_QUEUE_CHILD=1 setsid nohup bash "$SELF" "$@" > "$QUEUE_LOG" 2>&1 < /dev/null &
+  SEG_QUEUE_CHILD=1 setsid nohup bash "$SELF" "$@" >> "$QUEUE_LOG" 2>&1 < /dev/null &
   echo "seg queue launched on GPU $CUDA_VISIBLE_DEVICES, pid $!, log $QUEUE_LOG"
   exit 0
 fi

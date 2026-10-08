@@ -334,6 +334,8 @@ Paired AP50 differences [95 % CI]: greedy 10 − gate 10 +0.158 [+0.059, +0.257]
 
 Paired AP50 differences vs RGB [95 % CI] (`results/det/compare_rgb/compare.json`): greedy 10 − RGB +0.242 [+0.112, +0.356]; greedy 24 − RGB +0.222 [+0.092, +0.344]; PCA-11 − RGB +0.166 [+0.009, +0.309]; raw − RGB +0.165 [+0.038, +0.284]. Last-10-epoch val AP50 0.339 (raw 0.671, greedy 10 noise-free 0.714).
 
+*ROI export (2026-10-08).* `results/det/rois_rgb_A_test.json` (`main_det_rois.py --resume weights/rgb_A/model_best --split test`, the Stage-2 operating point): 133 ROIs on the 70 test frames, 45 false positives, 17 frames without any ROI (raw133_A 12, sel10g_clean_A 6, sel24g_clean_A 15), coverage recall@0.99 0.592. These are the boxes of the Stage-2 "strict RGB chain" (plan Results, 2026-10-08: the pseudo-RGB segmenter with RGB boxes reaches end-to-end S 0.751 against 0.849 for the ec10 chain).
+
 *Reading.* Spectral input helps: with the same detector and recipe, three broad RGB channels reach 0.497 AP50, about the level of the original gate methods (0.466 / 0.483), while the raw bands, PCA-11 and the greedy 10 / 24 EC readings are 0.17–0.24 higher, every CI excluding 0. Ten well-chosen EC readings therefore carry detection-relevant information that three RGB channels do not. Caveats: one seed; the RGB images are JPEG renderings of the same cubes (the "same scene, three broad channels" control rather than an independent camera).
 
 ## 11. Out of scope
