@@ -123,6 +123,39 @@ def test_eval_levels_runs_and_compare(synthetic_root, tmp_path, monkeypatch):
     assert c['S']['diff'] == pytest.approx(0.0) and c['IoU']['lo'] == pytest.approx(0.0) and c['IoU']['hi'] == pytest.approx(0.0)
 
 
+def test_rgb_roi_run_scores_the_rgb_runs_with_another_export(synthetic_root, tmp_path, monkeypatch):
+    '''
+    --rgb_roi_run (the strict RGB chain): the arm-'rgb' runs take their level-(c) boxes from another detector's export,
+    the raw runs evaluated alongside keep their own, and the rgb run's front end and frames are unchanged (oracle levels).
+    '''
+    root, det_ckpt, roi_dir = _setup(synthetic_root, tmp_path, monkeypatch)
+    monkeypatch.setattr(main_seg_eval, 'build_seg_model', lambda a, n_in, P, q: BoxEcho(n_in))
+    # det_B's export mirrors det_A's: frame 7 has no ROI, frame 8 one ROI on the object and no false positive
+    rois_b = {'7': {'rois': [], 'boxes': [], 'gt_boxes': [OBJ_BOX]},
+              '8': {'rois': [[18.5, 8.5, 27.5, 17.5, 0.8]], 'boxes': [OBJ_BOX + [0.8]], 'gt_boxes': [OBJ_BOX]}}
+    (roi_dir / 'rois_det_B_test.json').write_text(json.dumps(rois_b))
+    _write_run(tmp_path, 'r_s0', 'raw', 0, det_ckpt)
+    _write_run(tmp_path, 'g_s0', 'rgb', 0, det_ckpt)
+    main_seg_eval.main(_eval_args(root, tmp_path, roi_dir, '--runs', 'r_s0', 'g_s0', '--rgb_roi_run', 'det_B'))
+    det_r = json.loads((tmp_path / 'seg' / 'r_s0' / 'eval_full_det.json').read_text())
+    det_g = json.loads((tmp_path / 'seg' / 'g_s0' / 'eval_full_det.json').read_text())
+    assert det_r['det_run'] == 'det_A' and det_r['roi_file'].endswith('rois_det_A_test.json')
+    assert (det_r['n_frames_no_roi'], det_r['n_det_rois'], det_r['n_fp_rois']) == (1, 2, 1)
+    assert det_g['det_run'] == 'det_B' and det_g['roi_file'].endswith('rois_det_B_test.json')
+    assert (det_g['n_frames_no_roi'], det_g['n_det_rois'], det_g['n_fp_rois']) == (1, 1, 0)
+    # frame 8's box is the object (IoU 1), frame 7 is a miss (IoU 0); no false positive, so the false-mask rate is undefined
+    assert det_g['summary']['IoU'] == pytest.approx(0.5)
+    fmr = det_g['summary']['fp_false_mask_rate']
+    assert fmr is None or fmr != fmr
+    # the oracle levels do not depend on where the (c) boxes come from
+    roi_g = json.loads((tmp_path / 'seg' / 'g_s0' / 'eval_roi_oracle.json').read_text())
+    assert roi_g['det_run'] == 'det_B' and roi_g['summary']['IoU'] == pytest.approx(1.0)
+    # a missing export is named
+    (roi_dir / 'rois_det_B_test.json').unlink()
+    with pytest.raises(AssertionError, match='rois_det_B_test.json missing'):
+        main_seg_eval.main(_eval_args(root, tmp_path, roi_dir, '--runs', 'g_s0', '--rgb_roi_run', 'det_B'))
+
+
 def test_downscaled_rois_paste_back_near_the_gt(synthetic_root, tmp_path, monkeypatch):
     # ROIs of >= 40 px on a 32 px canvas: placed at s < 1 and resized back, so the box-echo mask is the GT up to interpolation
     root, det_ckpt, roi_dir = _setup(synthetic_root, tmp_path, monkeypatch)

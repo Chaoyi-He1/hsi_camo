@@ -8,7 +8,9 @@ optional zero-shot SAM2.1 control, on the 70 test frames:
                    main_det_rois.py) pasted back; a frame without any ROI is an empty mask (a miss). The detector's
                    false-positive ROIs (< 1 % of every object mask) give the false-mask rate. (c) is also scored with the
                    HyperCOD paper's protocol (SegMetrics(minmax=True): per-image min-max + uint8, Table 2 columns MAE,
-                   mean E, S, adaptive F)
+                   mean E, S, adaptive F). --rgb_roi_run <det_run> takes the (c) boxes of the arm-'rgb' runs and of the
+                   zero-shot control from that detector's export instead (the strict RGB chain: the RGB detector rgb_A's
+                   boxes); their pseudo-RGB front end and frame reads stay those of the detector they were trained against
 The frames are read once per pass (HyperCOD_data: fp16 cache, O_DIRECT full-frame read, the loader's p99 scaling); the runs
 of one pass (--runs_per_pass) keep their models on the GPU, so 29 SAM2-L sized runs need 5 passes instead of 29. Test items
 are built with the crop cache's geometry (data_loader.roi_crops: pixel_box, place_on_canvas, box_to_canvas, rasterise_box),
@@ -71,6 +73,9 @@ def get_args_parser():
     parser.add_argument('--canvas', type=int, default=512, help='canvas of the zero-shot control when no trained run fixes it')
     # protocol (spec §8)
     parser.add_argument('--roi_dir', type=str, default='results/det', help='where main_det_rois.py wrote rois_<det_run>_test.json')
+    parser.add_argument('--rgb_roi_run', type=str, default='',
+                        help="(c) boxes of the arm-'rgb' runs and the zero-shot control from this detector's export (rois_<run>_test.json) "
+                             "instead of the detector they were trained against: the strict RGB chain uses the RGB detector, rgb_A")
     parser.add_argument('--roi_margin', type=float, default=1.5, help='oracle ROI = GT box grown by this factor (the export rule)')
     parser.add_argument('--roi_min', type=float, default=256, help='... and at least this many px per side')
     parser.add_argument('--min_area', type=int, default=100, help='GT components below this many px are JPEG specks, not objects')
@@ -158,22 +163,25 @@ def det_cli_args(args):
                                                    '--no-wandb'])
 
 
-def load_detector_info(args, det_ckpt, cache):
+def load_detector_info(args, det_ckpt, cache, roi_run=''):
     '''
     Everything a run needs from its detector, once per detector checkpoint: its args (the front end is rebuilt from them),
     its state dict (the rebuilt front end is checked against its filter bank, spec §9), its run name, its exported test
     ROIs and a test HyperCOD_data built with its own filter settings (build_front_end and the frame reads use it). The
-    detector network itself is dropped: the ROIs come from main_det_rois.py's export.
+    detector network itself is dropped: the ROIs come from main_det_rois.py's export. roi_run names another detector
+    whose export supplies the ROIs instead (--rgb_roi_run, the strict RGB chain): the front end, its filter check and the
+    frame reads still come from det_ckpt, and 'det_run' then names the export actually used at level (c).
     '''
-    key = os.path.abspath(det_ckpt)
+    key = os.path.abspath(det_ckpt) + (f'|{roi_run}' if roi_run else '')     # one entry per (detector, ROI source)
     if key not in cache:
         model, det_args, det_run = load_detector(det_ckpt, det_cli_args(args), torch.device('cpu'))
         del model
         det_state = torch.load(det_ckpt, map_location='cpu', weights_only=False)['model']
         det_args.data_path, det_args.cache_dir = args.data_path, args.cache_dir   # the frames of this machine, whatever the ckpt says
         dataset = HyperCOD_data(split='test', **main_det.dataset_kwargs(det_args))
+        det_run = roi_run or det_run
         path = os.path.join(args.roi_dir, f'rois_{det_run}_test.json')
-        assert os.path.exists(path), f"{path} missing: export it with python main_det_rois.py --resume {det_ckpt} --split test (bash_files/launch_rois_all.sh)"
+        assert os.path.exists(path), f"{path} missing: export it with python main_det_rois.py --resume weights/{det_run}/<ckpt> --split test (bash_files/launch_rois_all.sh)"
         with open(path) as f:
             rois = json.load(f)
         missing = [n for n in dataset.img_name if n not in rois]
@@ -191,7 +199,8 @@ def load_run(args, run, det_cache):
     del ckpt                                                                            # ~0.9 GB for a SAM2-L run
     assert a.arm in ARM_ORDER, f"{path}: unknown arm {a.arm!r}"
     return dict(name=run, path=path, args=a, zero_shot=False, model_label=a.seg_model, arm=a.arm, seed=int(a.seed),
-                canvas=int(a.canvas), epoch=epoch, det=load_detector_info(args, a.det_ckpt, det_cache))
+                canvas=int(a.canvas), epoch=epoch,
+                det=load_detector_info(args, a.det_ckpt, det_cache, roi_run=args.rgb_roi_run if a.arm == 'rgb' else ''))
 
 
 def zero_shot_spec(args, canvas, det_cache):
@@ -203,7 +212,7 @@ def zero_shot_spec(args, canvas, det_cache):
     a = main_seg.get_args_parser().parse_args(argv)
     main_seg.load_cfg(a)
     return dict(name=ZS_NAME, path=None, args=a, zero_shot=True, model_label=ZS_MODEL, arm='rgb', seed=0, canvas=canvas,
-                epoch=None, det=load_detector_info(args, args.zero_shot_det_ckpt, det_cache))
+                epoch=None, det=load_detector_info(args, args.zero_shot_det_ckpt, det_cache, roi_run=args.rgb_roi_run))
 
 
 def build_run_model(spec, front_end, device):
