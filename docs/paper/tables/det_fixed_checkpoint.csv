@@ -1,0 +1,10 @@
+run,label,input,channels,seed,read_noise_db,ckpt_epochs,source,ap50,recall50,matched_iou,recall50_op,coverage_recall99_roi_op,dets_per_image_op
+sel10g_clean_A,greedy-10,"10 greedy-selected EC readings, whitened",10,42,0,59 69 79 89 99,compare_clean,0.7393,0.8169,0.8173,0.769,0.8085,1.5514
+sel24g_clean_A,greedy-24,"24 greedy-selected EC readings, whitened",24,42,0,59 69 79 89 99,compare_clean,0.7194,0.7775,0.818,0.7155,0.738,1.0886
+pca11_A,PCA-11,344 EC readings whitened to 11 principal directions,11,42,0,59 69 79 89 99,compare_clean,0.6628,0.7662,0.8145,0.6817,0.7127,1.2
+raw133_A,raw 133,"raw 133 cube bands, standardised",133,42,0,59 69 79 89 99,compare_clean,0.6618,0.7493,0.8265,0.7183,0.7408,1.4914
+sel10b_clean_A,gate-10 whitened,"session A's gate top-10 EC readings, whitened",10,42,0,59 69 79 89 99,compare_clean,0.5817,0.6451,0.8096,0.5803,0.6197,0.8314
+sel10u_clean_A,uniform-10,"10 uniformly spaced EC readings, whitened",10,42,0,59 69 79 89 99,compare_clean,0.5798,0.6507,0.8058,0.5859,0.6423,1.0457
+rgb_A,RGB,"the dataset's RGB image, 3 channels",3,42,0,59 69 79 89 99,compare_rgb,0.4971,0.6338,0.7734,0.5577,0.5859,1.18
+det_B,Session B,"gate top-10 EC readings, unwhitened, warm start from A (epochs 0-91)",10,42,0,59 69 79 89,compare_clean_detB,0.4833,0.5387,0.7307,0.5035,0.4965,0.8214
+det_A,Session A,all 344 EC readings + trainable channel weights,344,42,0,59 69 79 89 99,compare_clean,0.466,0.5606,0.738,0.5127,0.569,1.1657

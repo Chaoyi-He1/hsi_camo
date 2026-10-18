@@ -1,0 +1,23 @@
+{
+ "files": {
+  "det_fixed_checkpoint": "tables/det_fixed_checkpoint.csv",
+  "det_seed_summary": null,
+  "det_paired_differences": "tables/det_paired_differences.csv",
+  "det_val_curves": "figure_data/det_val_curves.csv",
+  "det_model_best": "tables/det_model_best.csv",
+  "sensor_response": "figure_data/sensor_response.npz",
+  "voltage_selection": "figure_data/voltage_selection.json",
+  "seg_groups": "tables/seg_groups.csv",
+  "seg_paired_differences": "tables/seg_paired_differences.csv",
+  "seg_per_run": "tables/seg_per_run.csv",
+  "seg_per_image": "figure_data/seg_per_image.csv.gz",
+  "seg_val_curves": "figure_data/seg_val_curves.csv",
+  "end_to_end_chains": "tables/end_to_end_chains.csv",
+  "paper_protocol_vs_published": "tables/paper_protocol_vs_published.csv",
+  "compute": "tables/compute.csv",
+  "det_per_image": "figure_data/det_per_image.csv.gz"
+ },
+ "missing": [
+  "results/det/compare_rawpca_seeds/compare.json"
+ ]
+}

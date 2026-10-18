@@ -1,0 +1,44 @@
+stage,run,label,n_epochs,epoch_s_median,val_s_median,train_h_total,peak_mem_mib,wall_h,gpu
+1,det_A,Session A,100,252.0,29.0,7.8,15315,,
+1,det_B,Session B,91,248,29,7.06,5323,,
+1,pca11_A,PCA-11,100,248.0,29.0,8.01,5332,,
+1,raw133_A,raw 133,100,248.0,29.0,7.79,6309,,
+1,rgb_A,RGB,100,15.0,8.0,0.64,3210,,
+1,sel10b_A,"gate-10, 40 dB",100,248.0,29.0,7.68,5324,,
+1,sel10b_clean_A,gate-10 whitened,100,248.0,29.0,7.67,5324,,
+1,sel10g_A,"greedy-10, 40 dB",100,247.0,29.0,7.68,5325,,
+1,sel10g_clean_A,greedy-10,100,248.0,29.0,7.68,5324,,
+1,sel10u_A,"uniform-10, 40 dB",100,248.0,29.0,7.93,5325,,
+1,sel10u_clean_A,uniform-10,100,248.0,29.0,7.68,5324,,
+1,sel24g_A,"greedy-24, 40 dB",100,249.0,29.0,7.95,5441,,
+1,sel24g_clean_A,greedy-24,100,248.0,29.0,7.7,5442,,
+2,seg_sam2box_ec10_s0,seg_sam2box_ec10_s0,200,28.0,8.0,2.01,9745,2.12,0
+2,seg_sam2box_ec10_s1,seg_sam2box_ec10_s1,200,27.0,9.0,1.99,9746,2.09,1
+2,seg_sam2box_ec10_s2,seg_sam2box_ec10_s2,200,36.0,10.0,2.64,9745,2.76,0
+2,seg_sam2box_ec24_s0,seg_sam2box_ec24_s0,200,28.0,7.0,1.94,9918,2.05,1
+2,seg_sam2box_ec24_s1,seg_sam2box_ec24_s1,200,28.0,6.0,1.89,9918,1.98,0
+2,seg_sam2box_ec24_s2,seg_sam2box_ec24_s2,200,34.0,8.0,2.39,9918,2.5,1
+2,seg_sam2box_raw_s0,seg_sam2box_raw_s0,200,29.0,8.0,2.04,11219,2.16,1
+2,seg_sam2box_raw_s1,seg_sam2box_raw_s1,200,27.0,9.0,1.99,11219,2.1,0
+2,seg_sam2box_raw_s2,seg_sam2box_raw_s2,200,43.0,11.0,3.52,11219,3.67,1
+2,seg_sam2unet_ec10_s0,seg_sam2unet_ec10_s0,200,29.0,8.0,2.33,10825,2.45,1
+2,seg_sam2unet_ec10_s1,seg_sam2unet_ec10_s1,200,29.0,7.5,2.03,10825,2.13,0
+2,seg_sam2unet_ec10_s2,seg_sam2unet_ec10_s2,200,40.0,12.0,3.32,10825,3.45,1
+2,seg_sam2unet_ec24_s0,seg_sam2unet_ec24_s0,200,29.0,7.0,1.97,10997,2.07,0
+2,seg_sam2unet_ec24_s1,seg_sam2unet_ec24_s1,200,29.0,6.0,1.96,10997,2.07,1
+2,seg_sam2unet_ec24_s2,seg_sam2unet_ec24_s2,200,44.0,11.0,3.74,10997,3.86,0
+2,seg_sam2unet_raw_s0,seg_sam2unet_raw_s0,200,29.0,8.0,2.29,12302,2.4,0
+2,seg_sam2unet_raw_s1,seg_sam2unet_raw_s1,200,27.0,7.0,1.92,12302,2.04,0
+2,seg_sam2unet_raw_s2,seg_sam2unet_raw_s2,200,37.0,9.0,2.95,12302,3.07,0
+2,seg_sam2unet_rgb_s0,seg_sam2unet_rgb_s0,200,28.0,7.0,1.91,10740,2.01,1
+2,seg_sam2unet_rgb_s1,seg_sam2unet_rgb_s1,200,29.0,8.0,2.09,10740,2.19,0
+2,seg_sam2unet_rgb_s2,seg_sam2unet_rgb_s2,200,29.0,8.0,2.1,10741,2.2,1
+2,seg_zoomnext_ec10_s0,seg_zoomnext_ec10_s0,200,33.0,6.0,2.16,8986,2.23,1
+2,seg_zoomnext_ec10_s1,seg_zoomnext_ec10_s1,200,35.0,6.0,2.28,8986,2.36,0
+2,seg_zoomnext_ec10_s2,seg_zoomnext_ec10_s2,200,34.0,6.0,2.31,8986,2.4,1
+2,seg_zoomnext_ec24_s0,seg_zoomnext_ec24_s0,200,35.0,6.0,2.25,9284,2.33,1
+2,seg_zoomnext_ec24_s1,seg_zoomnext_ec24_s1,200,35.0,6.0,2.31,9277,2.39,1
+2,seg_zoomnext_ec24_s2,seg_zoomnext_ec24_s2,200,34.0,6.0,2.24,9277,2.31,0
+2,seg_zoomnext_raw_s0,seg_zoomnext_raw_s0,200,35.0,7.0,2.31,11582,2.4,0
+2,seg_zoomnext_raw_s1,seg_zoomnext_raw_s1,200,37.0,7.0,2.45,11582,2.54,1
+2,seg_zoomnext_raw_s2,seg_zoomnext_raw_s2,200,38.0,7.0,2.53,11582,2.64,0
