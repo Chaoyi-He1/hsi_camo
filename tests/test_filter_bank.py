@@ -142,6 +142,30 @@ def test_build_filter_bank_reproduces_the_stage1_construction(synthetic_root, ca
     assert torch.equal(fb(x), ref(x))
 
 
+def test_raw_bands_with_pca_channels_whitens_the_bands(synthetic_root):
+    '''
+    --raw-bands --pca-channels K (raw-PCA-K): the whitening of the cube bands themselves, through the same code path as the
+    whitened EC readings, so the control differs from them only in R. Folded form without noise, explicit proj with noise.
+    '''
+    root, _, _ = synthetic_root
+    ds = _fb_ds(root)
+    mu, cov = ds._band_stats()
+    eye, std0 = np.eye(ds.n_bands, dtype=np.float32), np.sqrt(np.maximum(np.diag(cov), 0.0)).astype(np.float32)
+    fb, volts = build_filter_bank(types.SimpleNamespace(session='A', raw_bands=True, pca_channels=4), ds)
+    R_ref, mean_ref, std_ref, volts_ref = pca_whitened_channels(eye, mu.astype(np.float32), std0, cov, 4)
+    assert (fb.n_readings, fb.n_channels, fb.weight_vector) == (4, 4, False) and getattr(fb, 'proj', None) is None
+    np.testing.assert_array_equal(np.asarray(volts), volts_ref)                          # channel labels 1..K, as for the readings
+    np.testing.assert_array_equal(fb.R_t.numpy(), R_ref.T)
+    np.testing.assert_array_equal(fb.mean.numpy().reshape(-1), mean_ref); np.testing.assert_array_equal(fb.std.numpy().reshape(-1), std_ref)
+    x = torch.from_numpy(ds[0][0])[None].float()                                            # [1, 133, H, W]
+    u = fb.eval()(x)[0].reshape(4, -1).double()                                             # the whitened channels of one frame
+    assert u.shape[0] == 4 and torch.isfinite(u).all()
+    # with read noise the bands stay explicit and the whitening is the noise-regularised proj
+    fbn, voltsn = build_filter_bank(types.SimpleNamespace(session='A', raw_bands=True, pca_channels=4, read_noise_db=40.0), ds)
+    assert (fbn.n_readings, fbn.n_channels) == (ds.n_bands, 4) and tuple(fbn.proj.shape) == (4, ds.n_bands)   # stored as [K, N]
+    np.testing.assert_array_equal(np.asarray(voltsn), volts_ref)
+
+
 def test_ec_yolo_reexports_and_builds_through_build_filter_bank(synthetic_root, monkeypatch):
     # the moved helpers stay importable from models.ec_yolo (tests, main_select_voltages, docs/reports scripts)
     assert ec_yolo.pca_whitening is pca_whitening and ec_yolo.pca_whitened_channels is pca_whitened_channels

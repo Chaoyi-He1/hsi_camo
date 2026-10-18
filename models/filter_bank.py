@@ -239,7 +239,9 @@ def build_filter_bank(args, dataset):
                  raw_bands            identity over the cube bands, standardised with the training band statistics
                  (otherwise)          the dataset's selected EC responses (filter_select / filter_voltages / num_filters);
                                       session A carries the trainable weight vector unless no_gate
-                 pca_channels K       the top-K whitened principal directions of the responses; no weight vector
+                 pca_channels K       the top-K whitened principal directions of the channels above (the EC responses, or
+                                      with raw_bands the cube bands themselves: the control that separates "whitening"
+                                      from "which readings", spec §12 2026-10-18); no weight vector
                  read_noise_db        per-reading read noise inside the bank (read_noise_std, model read_noise_model)
                  read_noise_db_range  SNR augmentation of the training noise level
                  seed                 the eval-mode noise seed
@@ -254,6 +256,7 @@ def build_filter_bank(args, dataset):
     noise_model = getattr(args, 'read_noise_model', None) or 'floor'
     mu, cov = dataset._band_stats()                                                      # [n_bands], [n_bands, n_bands]
     noise_std = proj = None
+    k = int(getattr(args, 'pca_channels', 0) or 0)
     if getattr(args, 'raw_bands', False):
         # control run: the raw cube bands inside band_range go straight into the model (identity projection, standardised
         # with the training band statistics, no weight vector) to compare against the EC filter responses
@@ -268,15 +271,17 @@ def build_filter_bank(args, dataset):
         if noise_db > 0:
             R_all, _ = dataset.candidate_filter_matrix()                                 # every usable voltage: the floor is the device's
             noise_std = read_noise_std(R, mu, cov, noise_db, noise_model, R_ref=R_all)
-        k = int(getattr(args, 'pca_channels', 0) or 0)
-        if k > 0:
-            if noise_std is None:
-                R, mean, std, volts = pca_whitened_channels(R, mean, std, cov, k)        # folded form, as the runs before read noise
-            else:
-                # the readings stay explicit so the noise lands on them before the whitening (FilterBank docstring)
-                V, lam = pca_whitening(R, mean, std, cov, k, noise_var=(noise_std / std) ** 2)
-                proj, volts = (V / np.sqrt(lam)).astype(np.float32), np.arange(1, k + 1, dtype=np.float64)
-            weight_vector = False
+    if k > 0:
+        # whitened principal directions of the standardised channels: of the EC readings, or with --raw-bands of the cube
+        # bands (raw-PCA-K, the control that separates the whitening from the choice of 10 readings); the same code path,
+        # so the two inputs differ only in R
+        if noise_std is None:
+            R, mean, std, volts = pca_whitened_channels(R, mean, std, cov, k)            # folded form, as the runs before read noise
+        else:
+            # the readings stay explicit so the noise lands on them before the whitening (FilterBank docstring)
+            V, lam = pca_whitening(R, mean, std, cov, k, noise_var=(noise_std / std) ** 2)
+            proj, volts = (V / np.sqrt(lam)).astype(np.float32), np.arange(1, k + 1, dtype=np.float64)
+        weight_vector = False
     scale_range = None
     db_range = getattr(args, 'read_noise_db_range', None)
     if noise_std is not None and db_range:
