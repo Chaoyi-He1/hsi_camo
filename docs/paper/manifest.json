@@ -1,7 +1,7 @@
 {
  "files": {
   "det_fixed_checkpoint": "tables/det_fixed_checkpoint.csv",
-  "det_seed_summary": null,
+  "det_seed_summary": "tables/det_seed_summary.csv",
   "det_paired_differences": "tables/det_paired_differences.csv",
   "det_val_curves": "figure_data/det_val_curves.csv",
   "det_model_best": "tables/det_model_best.csv",
@@ -17,7 +17,5 @@
   "compute": "tables/compute.csv",
   "det_per_image": "figure_data/det_per_image.csv.gz"
  },
- "missing": [
-  "results/det/compare_rawpca_seeds/compare.json"
- ]
+ "missing": []
 }

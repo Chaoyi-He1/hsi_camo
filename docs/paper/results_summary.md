@@ -24,10 +24,16 @@ flagged (`read_noise_db = 40`); the headline results are noise-free.
 |---|---|---|---|---|---|
 | greedy-10 | 10 | 0.739 | 0.817 | 0.808 | 1.55 |
 | greedy-24 | 24 | 0.719 | 0.777 | 0.738 | 1.09 |
+| greedy-10 (seed 2) | 10 | 0.708 | 0.780 | 0.744 | 1.19 |
+| greedy-10 (seed 1) | 10 | 0.685 | 0.769 | 0.730 | 1.16 |
+| raw-PCA-40 | 40 | 0.664 | 0.738 | 0.730 | 1.25 |
 | PCA-11 | 11 | 0.663 | 0.766 | 0.713 | 1.20 |
 | raw 133 | 133 | 0.662 | 0.749 | 0.741 | 1.49 |
+| raw 133 (seed 2) | 133 | 0.647 | 0.749 | 0.730 | 1.29 |
+| raw 133 (seed 1) | 133 | 0.646 | 0.724 | 0.724 | 1.57 |
 | gate-10 whitened | 10 | 0.582 | 0.645 | 0.620 | 0.83 |
 | uniform-10 | 10 | 0.580 | 0.651 | 0.642 | 1.05 |
+| raw-PCA-10 | 10 | 0.519 | 0.609 | 0.609 | 1.02 |
 | RGB | 3 | 0.497 | 0.634 | 0.586 | 1.18 |
 | Session B | 10 | 0.483 | 0.539 | 0.496 | 0.82 |
 | Session A | 344 | 0.466 | 0.561 | 0.569 | 1.17 |
@@ -40,10 +46,12 @@ Paired differences (AP50, 95 % CI from 2000 paired image bootstraps; sign = firs
 - ROI coverage: greedy-10 − raw 133: +0.068 [-0.009, +0.147]; greedy-10 − RGB: +0.223 [+0.123, +0.324]
 
 Training-seed spread (fixed checkpoints, per seed):
-- single seed (42) per detector so far
+- raw 133: AP50 0.651 ± 0.009 (n = 3: 0.646–0.662); recall50 0.741 ± 0.015; ROI coverage 0.732 ± 0.009
+- greedy-10: AP50 0.711 ± 0.027 (n = 3: 0.685–0.739); recall50 0.789 ± 0.025; ROI coverage 0.761 ± 0.042
 
 Whitening vs. selection controls (raw bands whitened to K principal directions):
-- raw-PCA-10 / raw-PCA-40 and the extra seeds: not yet in results/det/compare_rawpca_seeds (queue bash_files/launch_rawpca_seeds_queue.sh)
+- raw-PCA-10: AP50 0.519, recall50 0.608, ROI coverage 0.608; greedy-10 − raw-PCA-10 = +0.220 [+0.112, +0.322]; raw-PCA-10 − raw 133 = -0.143 [-0.244, -0.041]
+- raw-PCA-40: AP50 0.664, recall50 0.738, ROI coverage 0.730; greedy-10 − raw-PCA-40 = +0.075 [+0.004, +0.148]; raw-PCA-40 − raw 133 = +0.002 [-0.099, +0.095]
 
 Model-best (validation-selected) checkpoints are in `tables/det_model_best.csv`; they are not used for the comparisons (the selection rule
 ignores AP50 and often picks early epochs).
@@ -100,6 +108,7 @@ Extended Data: per-image detection hits (`det_per_image.csv`), model_last vs mod
 ## 7. Files
 
 - `tables/det_fixed_checkpoint.csv`
+- `tables/det_seed_summary.csv`
 - `tables/det_paired_differences.csv`
 - `figure_data/det_val_curves.csv`
 - `tables/det_model_best.csv`
@@ -114,5 +123,3 @@ Extended Data: per-image detection hits (`det_per_image.csv`), model_last vs mod
 - `tables/paper_protocol_vs_published.csv`
 - `tables/compute.csv`
 - `figure_data/det_per_image.csv.gz`
-
-Missing inputs (skipped): `results/det/compare_rawpca_seeds/compare.json`
