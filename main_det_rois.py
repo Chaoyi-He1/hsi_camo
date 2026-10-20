@@ -43,7 +43,7 @@ def get_args_parser():
     parser.add_argument('--split', type=str, default='test', choices=['train', 'val', 'test'],
                         help="train: the detector's training ids; val: the held-out ids of --split-file; test: the test split")
     parser.add_argument('--out-dir', default='results/det')
-    parser.add_argument('--max-rois', type=int, default=None, help='detections kept per frame; overrides cfg roi_topk')
+    parser.add_argument('--max-rois', type=int, default=None, help='detections kept per frame; overrides cfg roi_topk (main_det\'s --roi-conf / --roi-topk also apply)')
     parser.set_defaults(wandb=False)
     return parser
 
@@ -101,6 +101,7 @@ def main(args):
     assert args.resume, "--resume <detector checkpoint> is required, e.g. --resume weights/sel10g_clean_A/model_best"
     if args.max_rois is not None:
         args.roi_topk = args.max_rois
+    # --roi-conf needs no handling here: its argparse default is None, so load_cfg above filled it from cfg unless it was given
     # the export operating point is cfg roi_conf/roi_topk, the same one evaluate() reports its *_op metrics at
     print(f"ROI operating point: conf >= {args.roi_conf}, top {args.roi_topk} per frame")
     device = torch.device(args.device if args.device == 'cpu' or torch.cuda.is_available() else 'cpu')

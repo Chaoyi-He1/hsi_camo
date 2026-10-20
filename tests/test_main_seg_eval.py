@@ -150,6 +150,11 @@ def test_rgb_roi_run_scores_the_rgb_runs_with_another_export(synthetic_root, tmp
     # the oracle levels do not depend on where the (c) boxes come from
     roi_g = json.loads((tmp_path / 'seg' / 'g_s0' / 'eval_roi_oracle.json').read_text())
     assert roi_g['det_run'] == 'det_B' and roi_g['summary']['IoU'] == pytest.approx(1.0)
+    # --roi_run applies to every run (fused boxes / another operating point): the raw run too, and it overrides --rgb_roi_run
+    main_seg_eval.main(_eval_args(root, tmp_path, roi_dir, '--runs', 'r_s0', 'g_s0', '--roi_run', 'det_B', '--rgb_roi_run', 'det_A', '--out_dir', str(tmp_path / 'seg2')))
+    for run in ('r_s0', 'g_s0'):
+        d = json.loads((tmp_path / 'seg2' / run / 'eval_full_det.json').read_text())
+        assert d['det_run'] == 'det_B' and (d['n_frames_no_roi'], d['n_det_rois'], d['n_fp_rois']) == (1, 1, 0)
     # a missing export is named
     (roi_dir / 'rois_det_B_test.json').unlink()
     with pytest.raises(AssertionError, match='rois_det_B_test.json missing'):

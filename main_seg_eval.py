@@ -76,6 +76,9 @@ def get_args_parser():
     parser.add_argument('--rgb_roi_run', type=str, default='',
                         help="(c) boxes of the arm-'rgb' runs and the zero-shot control from this detector's export (rois_<run>_test.json) "
                              "instead of the detector they were trained against: the strict RGB chain uses the RGB detector, rgb_A")
+    parser.add_argument('--roi_run', type=str, default='',
+                        help="(c) boxes of EVERY run (and the zero-shot control) from this export, <roi_dir>/rois_<roi_run>_test.json, instead of "
+                             "each run's own detector: fused detector boxes (main_fuse_rois.py) or another operating point; overrides --rgb_roi_run")
     parser.add_argument('--roi_margin', type=float, default=1.5, help='oracle ROI = GT box grown by this factor (the export rule)')
     parser.add_argument('--roi_min', type=float, default=256, help='... and at least this many px per side')
     parser.add_argument('--min_area', type=int, default=100, help='GT components below this many px are JPEG specks, not objects')
@@ -200,7 +203,7 @@ def load_run(args, run, det_cache):
     assert a.arm in ARM_ORDER, f"{path}: unknown arm {a.arm!r}"
     return dict(name=run, path=path, args=a, zero_shot=False, model_label=a.seg_model, arm=a.arm, seed=int(a.seed),
                 canvas=int(a.canvas), epoch=epoch,
-                det=load_detector_info(args, a.det_ckpt, det_cache, roi_run=args.rgb_roi_run if a.arm == 'rgb' else ''))
+                det=load_detector_info(args, a.det_ckpt, det_cache, roi_run=args.roi_run or (args.rgb_roi_run if a.arm == 'rgb' else '')))
 
 
 def zero_shot_spec(args, canvas, det_cache):
@@ -212,7 +215,7 @@ def zero_shot_spec(args, canvas, det_cache):
     a = main_seg.get_args_parser().parse_args(argv)
     main_seg.load_cfg(a)
     return dict(name=ZS_NAME, path=None, args=a, zero_shot=True, model_label=ZS_MODEL, arm='rgb', seed=0, canvas=canvas,
-                epoch=None, det=load_detector_info(args, args.zero_shot_det_ckpt, det_cache, roi_run=args.rgb_roi_run))
+                epoch=None, det=load_detector_info(args, args.zero_shot_det_ckpt, det_cache, roi_run=args.roi_run or args.rgb_roi_run))
 
 
 def build_run_model(spec, front_end, device):
