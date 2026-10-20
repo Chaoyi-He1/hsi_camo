@@ -334,6 +334,48 @@ def main(args):
                             S=r4(p['S']['mean']), E_mean=r4(p['E_mean']['mean']), MAE=r4(p['MAE']['mean']), F_adp=r4(p['F_adp']['mean']), n_seeds=p['S']['n']))
     manifest['paper_protocol_vs_published'] = write_csv(os.path.join(tables, 'paper_protocol_vs_published.csv'), pub)
 
+    # ---------------------------------------------------------------- 5b. box study: operating points, fused / merged boxes and the no-detector exports,
+    # scored by the ec10 segmenters (seed 0) and the zero-shot control; box statistics from the ROI exports themselves
+    gt_file = os.path.join(args.results_dir, 'det', 'rois_sel10g_clean_A_test.json')
+    gt_boxes = {k: v['gt_boxes'] for k, v in json.load(open(gt_file)).items()} if os.path.isfile(gt_file) else {}
+
+    def box_stats(roi_file):
+        rois = json.load(open(roi_file))
+        n_gt = n_in = 0
+        for name, gts in gt_boxes.items():
+            for g in gts:
+                n_gt += 1
+                n_in += int(any(r[0] <= g[0] and r[1] <= g[1] and r[2] >= g[2] and r[3] >= g[3] for r in rois.get(name, {'rois': []})['rois']))
+        return dict(frames_without_box=sum(1 for v in rois.values() if not v['rois']), boxes=sum(len(v['rois']) for v in rois.values()), gt_inside_roi=r4(n_in / max(n_gt, 1)))
+
+    brows = []
+    BASE_SET = 'ec10 default (conf >= 0.02, top 5)'
+    box_sets = [(BASE_SET, 'baseline', os.path.join(args.results_dir, 'seg'), gt_file)]
+    for d in sorted(glob.glob(os.path.join(args.results_dir, 'seg_op', '*', 'compare.json'))):
+        tag = os.path.basename(os.path.dirname(d))
+        box_sets.append((f'ec10 operating point {tag}', 'operating point', os.path.dirname(d), os.path.join(args.results_dir, 'det', 'rois_op', tag, 'rois_sel10g_clean_A_test.json')))
+    for kind, folder in (('fused / merged boxes', 'seg_fuse'), ('no detector', 'seg_nodet')):
+        for d in sorted(glob.glob(os.path.join(args.results_dir, folder, '*', 'compare.json'))):
+            name = os.path.basename(os.path.dirname(d))
+            box_sets.append((name, kind, os.path.dirname(d), os.path.join(args.results_dir, 'det', f'rois_{name}_test.json')))
+    for label, kind, out_dir, roi_file in box_sets:
+        if not os.path.isfile(roi_file):
+            missing.append(roi_file); continue
+        row = dict(box_set=label, kind=kind, **box_stats(roi_file))
+        for m in ('sam2unet', 'sam2box', 'zoomnext', 'sam2box_zs'):
+            if m == 'sam2box_zs' and kind == 'baseline':
+                continue                                            # the queue's zero-shot control used raw133_A's boxes, not this set
+            p = os.path.join(out_dir, 'zs_sam2box_rgb' if m == 'sam2box_zs' else f'seg_{m}_ec10_s0', 'eval_full_det.json')
+            if os.path.isfile(p):
+                e = json.load(open(p)); s = e['summary']
+                if m != 'sam2box_zs':
+                    row['fp_boxes'] = e['n_fp_rois']
+                for k in ('S', 'IoU', 'Fw'):
+                    row[f'{m}_{k}'] = r4(s[k])
+                row[f'{m}_false_mask_rate'] = r4(s.get('fp_false_mask_rate')) if s.get('fp_false_mask_rate') == s.get('fp_false_mask_rate') else None
+        brows.append(row)
+    manifest['box_study'] = write_csv(os.path.join(tables, 'box_study.csv'), brows) if brows else None
+
     # ---------------------------------------------------------------- 6. compute
     crow = []
     for run in sorted(set(DET_RUNS) | set(det_means)):
@@ -488,6 +530,32 @@ Extended Data: per-image detection hits (`det_per_image.csv`), model_last vs mod
 
 ''' + '\n'.join(f'- `{os.path.relpath(v, out)}`' for v in manifest.values() if v) + (
         '\n\nMissing inputs (skipped): ' + ', '.join(f'`{m}`' for m in missing) if missing else '') + '\n'
+    if brows:
+        def bget(label, m, k='S'):
+            r = next((r for r in brows if r['box_set'] == label), None)
+            return f"{r[f'{m}_{k}']:.3f}" if r and r.get(f'{m}_{k}') is not None else 'n/a'
+        best = max((r for r in brows if r['kind'] == 'operating point' and r.get('sam2unet_S') is not None), key=lambda r: r['sam2unet_S'], default=None)
+        box_md = ('## 3b. Box study — what the detector boxes cost and what cheaper boxes buy (`tables/box_study.csv`)\n\n'
+                  'The ec10 segmenters (seed 0) scored end to end with other box sets than their detector\'s default operating point '
+                  '(confidence >= 0.02, top 5 per image): an operating-point sweep of sel10g_clean_A, unions of several detectors\' boxes, '
+                  'overlapping boxes merged into one (`main_fuse_rois.py --merge`), and the no-detector references (the whole frame as one ROI; '
+                  'a 512-px window grid at native resolution). Box statistics: frames without any box, boxes, false-positive boxes, GT boxes fully '
+                  'inside some ROI.\n\n'
+                  '| box set | kind | frames w/o box | boxes | fp boxes | GT inside ROI | SAM2-UNet S / IoU | SAM2.1+box S / IoU | ZoomNeXt S / IoU | zero-shot S / IoU |\n|---|---|---|---|---|---|---|---|---|---|\n'
+                  + ''.join(f"| {r['box_set']} | {r['kind']} | {r['frames_without_box']} | {r['boxes']} | {r.get('fp_boxes', '')} | {r['gt_inside_roi']:.3f} | "
+                            + ' | '.join((f"{r[m + '_S']:.3f} / {r[m + '_IoU']:.3f}" if r.get(m + '_S') is not None else '—') for m in ('sam2unet', 'sam2box', 'zoomnext', 'sam2box_zs')) + ' |\n' for r in brows)
+                  + (f"\nBest operating point for SAM2-UNet: {best['box_set']} (S {best['sam2unet_S']:.3f} vs {bget(BASE_SET, 'sam2unet')} at the default): the trained segmenters "
+                     f"suppress most of the extra false-positive boxes, so recall is worth more than precision at this stage. Merging overlapping boxes at the default point: S "
+                     f"{bget('ec10_union', 'sam2unet')} (union) / {bget('ec10_wbf', 'sam2unet')} (wbf) vs {bget(BASE_SET, 'sam2unet')} — imperfect boxes cost almost nothing, the detector's "
+                     f"cost is the frames it leaves without a box. No detector (SAM2-UNet / SAM2.1+box / ZoomNeXt S): whole frame as one ROI {bget('full_frame', 'sam2unet')} / "
+                     f"{bget('full_frame', 'sam2box')} / {bget('full_frame', 'zoomnext')}, 512-px window grid {bget('windows_512', 'sam2unet')} / {bget('windows_512', 'sam2box')} / "
+                     f"{bget('windows_512', 'zoomnext')} (zero-shot SAM2.1 {bget('full_frame', 'sam2box_zs')} / {bget('windows_512', 'sam2box_zs')}). Whether the detector is needed therefore depends on "
+                     f"the segmenter: the COD-pretrained ZoomNeXt comes within 0.01 S of its detector-guided default from the dense grid (IoU {bget('windows_512', 'zoomnext', 'IoU')} vs "
+                     f"{bget(BASE_SET, 'zoomnext', 'IoU')}, at 15 segmenter passes per image instead of <= 5), while the SAM2-based segmenters do not (SAM2-UNet "
+                     f"{bget('windows_512', 'sam2unet')}; SAM2.1+box {bget('windows_512', 'sam2box')}, because a box prompt presupposes an object and most empty windows get a mask). "
+                     f"For the window grid the 'GT inside ROI' column counts only objects that fit inside one window; the pasted-back map covers every pixel. The segmenters were trained on "
+                     f"object-centred ROIs, so the no-detector rows are a bound on what the detector adds, not a trained full-frame baseline.\n\n" if best else '\n'))
+        md = md.replace('## 4. Claims and the evidence behind them', box_md + '## 4. Claims and the evidence behind them', 1)
     with open(os.path.join(out, 'results_summary.md'), 'w') as f:
         f.write(md)
     json.dump(dict(files={k: (os.path.relpath(v, out) if v else None) for k, v in manifest.items()}, missing=missing), open(os.path.join(out, 'manifest.json'), 'w'), indent=1)

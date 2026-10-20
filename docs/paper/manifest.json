@@ -14,6 +14,7 @@
   "seg_val_curves": "figure_data/seg_val_curves.csv",
   "end_to_end_chains": "tables/end_to_end_chains.csv",
   "paper_protocol_vs_published": "tables/paper_protocol_vs_published.csv",
+  "box_study": "tables/box_study.csv",
   "compute": "tables/compute.csv",
   "det_per_image": "figure_data/det_per_image.csv.gz"
  },

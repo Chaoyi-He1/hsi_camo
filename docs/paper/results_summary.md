@@ -77,6 +77,32 @@ Level (c) end to end: ec10 − raw: SAM2-UNet +0.025 [-0.016, +0.066], SAM2.1+bo
 Detector boxes on the 70 test images (frames without any box / false-positive boxes): see `tables/end_to_end_chains.csv` and `tables/seg_per_run.csv`
 (false-mask rate = share of false-positive boxes in which the segmenter predicts anything > 0.5).
 
+## 3b. Box study — what the detector boxes cost and what cheaper boxes buy (`tables/box_study.csv`)
+
+The ec10 segmenters (seed 0) scored end to end with other box sets than their detector's default operating point (confidence >= 0.02, top 5 per image): an operating-point sweep of sel10g_clean_A, unions of several detectors' boxes, overlapping boxes merged into one (`main_fuse_rois.py --merge`), and the no-detector references (the whole frame as one ROI; a 512-px window grid at native resolution). Box statistics: frames without any box, boxes, false-positive boxes, GT boxes fully inside some ROI.
+
+| box set | kind | frames w/o box | boxes | fp boxes | GT inside ROI | SAM2-UNet S / IoU | SAM2.1+box S / IoU | ZoomNeXt S / IoU | zero-shot S / IoU |
+|---|---|---|---|---|---|---|---|---|---|
+| ec10 default (conf >= 0.02, top 5) | baseline | 6 | 116 | 27 | 0.817 | 0.852 / 0.669 | 0.852 / 0.666 | 0.856 / 0.680 | — |
+| ec10 operating point c0.001_k15 | operating point | 4 | 302 | 124 | 0.901 | 0.875 / 0.708 | 0.863 / 0.673 | 0.881 / 0.713 | — |
+| ec10 operating point c0.002_k5 | operating point | 4 | 174 | 54 | 0.859 | 0.868 / 0.695 | 0.867 / 0.694 | 0.872 / 0.709 | — |
+| ec10 operating point c0.005_k10 | operating point | 5 | 189 | 65 | 0.859 | 0.867 / 0.693 | 0.866 / 0.685 | 0.872 / 0.703 | — |
+| ec10 operating point c0.005_k5 | operating point | 5 | 155 | 45 | 0.845 | 0.863 / 0.686 | 0.862 / 0.684 | 0.868 / 0.700 | — |
+| ec10 operating point c0.01_k5 | operating point | 5 | 139 | 41 | 0.831 | 0.856 / 0.674 | 0.857 / 0.675 | 0.863 / 0.692 | — |
+| ec10 operating point c0.02_k10 | operating point | 6 | 118 | 29 | 0.817 | 0.852 / 0.669 | 0.852 / 0.666 | 0.856 / 0.680 | — |
+| ec10_c0.005_union | fused / merged boxes | 5 | 111 | 37 | 0.845 | 0.864 / 0.689 | 0.863 / 0.685 | 0.868 / 0.700 | — |
+| ec10_union | fused / merged boxes | 6 | 89 | 23 | 0.817 | 0.853 / 0.671 | 0.853 / 0.666 | 0.856 / 0.680 | — |
+| ec10_wbf | fused / merged boxes | 6 | 89 | 23 | 0.817 | 0.853 / 0.669 | 0.852 / 0.666 | 0.857 / 0.681 | — |
+| fuse_ec10_seeds | fused / merged boxes | 5 | 149 | 50 | 0.859 | 0.862 / 0.690 | 0.855 / 0.669 | 0.863 / 0.693 | — |
+| fuse_raw_ec10 | fused / merged boxes | 5 | 150 | 57 | 0.887 | 0.871 / 0.692 | 0.854 / 0.639 | 0.875 / 0.701 | — |
+| fuse_raw_ec10_ec24 | fused / merged boxes | 5 | 178 | 68 | 0.887 | 0.872 / 0.696 | 0.852 / 0.642 | 0.873 / 0.699 | — |
+| fuse_raw_ec10_seeds | fused / merged boxes | 4 | 201 | 81 | 0.887 | 0.861 / 0.678 | 0.839 / 0.611 | 0.862 / 0.680 | — |
+| fuse_raw_ec10_union | fused / merged boxes | 5 | 134 | 52 | 0.887 | 0.873 / 0.694 | 0.856 / 0.645 | 0.875 / 0.702 | — |
+| full_frame | no detector | 0 | 70 | 0 | 1.000 | 0.732 / 0.433 | 0.529 / 0.119 | 0.712 / 0.390 | 0.051 / 0.003 |
+| windows_512 | no detector | 0 | 1050 | 838 | 0.817 | 0.782 / 0.487 | 0.454 / 0.086 | 0.863 / 0.670 | 0.033 / 0.003 |
+
+Best operating point for SAM2-UNet: ec10 operating point c0.001_k15 (S 0.875 vs 0.852 at the default): the trained segmenters suppress most of the extra false-positive boxes, so recall is worth more than precision at this stage. Merging overlapping boxes at the default point: S 0.853 (union) / 0.853 (wbf) vs 0.852 — imperfect boxes cost almost nothing, the detector's cost is the frames it leaves without a box. No detector (SAM2-UNet / SAM2.1+box / ZoomNeXt S): whole frame as one ROI 0.732 / 0.529 / 0.712, 512-px window grid 0.782 / 0.454 / 0.863 (zero-shot SAM2.1 0.051 / 0.033). Whether the detector is needed therefore depends on the segmenter: the COD-pretrained ZoomNeXt comes within 0.01 S of its detector-guided default from the dense grid (IoU 0.670 vs 0.680, at 15 segmenter passes per image instead of <= 5), while the SAM2-based segmenters do not (SAM2-UNet 0.782; SAM2.1+box 0.454, because a box prompt presupposes an object and most empty windows get a mask). For the window grid the 'GT inside ROI' column counts only objects that fit inside one window; the pasted-back map covers every pixel. The segmenters were trained on object-centred ROIs, so the no-detector rows are a bound on what the detector adds, not a trained full-frame baseline.
+
 ## 4. Claims and the evidence behind them
 
 1. **Ten EC readings replace the 133-band cube for detection.** greedy-10 AP50 0.739 vs raw 133 0.662 (+0.077 [-0.013, +0.162]); ROI coverage 0.808 vs 0.741. Seeds and the raw-PCA controls above say how much of this is whitening vs. selection.
@@ -121,5 +147,6 @@ Extended Data: per-image detection hits (`det_per_image.csv`), model_last vs mod
 - `figure_data/seg_val_curves.csv`
 - `tables/end_to_end_chains.csv`
 - `tables/paper_protocol_vs_published.csv`
+- `tables/box_study.csv`
 - `tables/compute.csv`
 - `figure_data/det_per_image.csv.gz`
