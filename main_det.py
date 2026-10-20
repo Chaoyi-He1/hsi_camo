@@ -45,7 +45,7 @@ from data_loader.det_splits import make_det_splits
 from data_loader.cube_cache import default_cache_dir
 from models.ec_yolo import build_ec_yolo, select_top_k, slice_to_channels
 from models.filter_bank import assert_rgb_compatible
-from train_eval.train_eval_det import train_one_epoch, evaluate
+from train_eval.train_eval_det import train_one_epoch, evaluate, ModelEMA
 from train_eval.box_metrics import select_score
 
 torch.multiprocessing.set_sharing_strategy('file_system')
@@ -112,6 +112,24 @@ def get_args_parser():
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N')
     parser.add_argument('--amp', action='store_false', help='disable mixed precision; ignored on CUDA, where fp16 is required to fit the response tensor')
     parser.add_argument('--no-flip', action='store_true', help='disable random h/v flips')
+    # recall without new data (plan item 3, 2026-10-20): scale / crop and photometric jitter, weight EMA, training on train + val
+    parser.add_argument('--aug_scale', type=float, nargs=2, default=None,
+                        help='random rescale of every training frame, log-uniform in [lo, hi] (e.g. 0.67 1.5), then a random native-size crop '
+                             '(scale > 1) or a random placement on a canvas filled with the frame mean (scale < 1); boxes follow, those that keep '
+                             'less than --aug_min_visible of their area are dropped. Default: off')
+    parser.add_argument('--aug_min_visible', type=float, default=0.3, help='a box cut by the --aug_scale crop is kept if at least this fraction of its area is left')
+    parser.add_argument('--aug_gain', type=float, default=0.0, help='illumination jitter: every training frame is scaled by exp(U(-g, g)); 0 = off')
+    parser.add_argument('--aug_tilt', type=float, default=0.0,
+                        help='spectral tilt jitter: a linear ramp 1 + a * (-1..1) over the input channels with a ~ U(-t, t); 0 = off')
+    parser.add_argument('--ema', action='store_true',
+                        help='keep an exponential moving average of the weights (updated per optimizer step, warm-up decay_t = ema_decay * (1 - exp(-t / ema_tau))); '
+                             'validation, model_best and model_<epoch> hold the EMA weights, the raw ones are stored under model_raw')
+    parser.add_argument('--ema_decay', type=float, default=0.992,
+                        help='EMA decay per optimizer step; at batch 2 x accumulate 4 one epoch is ~32 steps, so 0.992 averages over ~4 epochs')
+    parser.add_argument('--ema_tau', type=float, default=128.0, help='EMA warm-up length in optimizer steps')
+    parser.add_argument('--train_on_val', action='store_true',
+                        help='add the val frames to the training set (the val metrics and model_best are then not held out: use the fixed-checkpoint '
+                             'protocol of main_det_compare / model_<last epoch>)')
     parser.add_argument('--save_every', default=10, type=int)
     # eval overrides
     parser.add_argument('--conf-thres', type=float, default=None); parser.add_argument('--iou-thres', type=float, default=None)
@@ -180,6 +198,8 @@ def build_datasets(args):
     n_train_ids = len([f for f in os.listdir(hsi_dir) if f.endswith('.mat')])
     n_val = min(28, max(1, n_train_ids - 1))
     train_ids, val_ids = make_det_splits(args.data_path, n_val=n_val, path=args.split_file or None)
+    if getattr(args, 'train_on_val', False):
+        train_ids = sorted(train_ids + val_ids, key=int)                               # val stays as a (no longer held-out) monitor
     test_ids = None
     if args.limit:
         train_ids, val_ids = train_ids[:args.limit], val_ids[:max(1, args.limit // 4)]
@@ -235,12 +255,16 @@ def build_model(args, dataset_train, ckpt=None):
     return model
 
 
-def save_checkpoint(path, model, optimizer, scaler, scheduler, epoch, args, best=(-1.0, -1.0)):
-    utils.save_on_master({'model': model.state_dict(), 'optimizer': optimizer.state_dict() if optimizer else None,
-                          'scaler': scaler.state_dict() if scaler else None, 'lr_scheduler': scheduler.state_dict() if scheduler else None,
-                          'epoch': epoch, 'args': vars(args), 'selected_indices': list(model.selected_indices),
-                          'selected_voltages': [float(v) for v in model.selected_voltages],
-                          'best': [float(v) for v in best]}, path)
+def save_checkpoint(path, model, optimizer, scaler, scheduler, epoch, args, best=(-1.0, -1.0), ema=None):
+    '''With an EMA the checkpoint's 'model' holds the averaged weights (what every downstream tool loads) and 'model_raw' the trained ones.'''
+    state = {'model': (ema.module if ema is not None else model).state_dict(), 'optimizer': optimizer.state_dict() if optimizer else None,
+             'scaler': scaler.state_dict() if scaler else None, 'lr_scheduler': scheduler.state_dict() if scheduler else None,
+             'epoch': epoch, 'args': vars(args), 'selected_indices': list(model.selected_indices),
+             'selected_voltages': [float(v) for v in model.selected_voltages],
+             'best': [float(v) for v in best]}
+    if ema is not None:
+        state['model_raw'] = model.state_dict(); state['ema'] = ema.state_dict()
+    utils.save_on_master(state, path)
 
 
 def main(args):
@@ -255,7 +279,11 @@ def main(args):
 
     dataset_train, dataset_val, dataset_test = build_datasets(args)
     print(f"train {len(dataset_train)} / val {len(dataset_val)} / test {len(dataset_test)} frames, "
-          + ("RGB images (3 channels)" if args.rgb_images else f"{dataset_train.n_bands} bands"))
+          + ("RGB images (3 channels)" if args.rgb_images else f"{dataset_train.n_bands} bands")
+          + (" -- the val frames are in the training set (--train_on_val): val metrics and model_best are not held out" if args.train_on_val else ""))
+    aug = {'scale': tuple(args.aug_scale) if args.aug_scale else None, 'min_visible': args.aug_min_visible, 'gain': args.aug_gain, 'tilt': args.aug_tilt}
+    if aug['scale'] or aug['gain'] > 0 or aug['tilt'] > 0:
+        print(f"augmentation: scale {aug['scale']} (min visible {aug['min_visible']}), gain {aug['gain']}, tilt {aug['tilt']}")
     sampler_train = build_train_sampler(dataset_train, args.distributed)
     collate = partial(det_collate_fn, min_area=args.min_area)
     mk = lambda ds, sampler, bs, shuffle: torch.utils.data.DataLoader(ds, batch_size=bs, sampler=sampler, shuffle=shuffle, num_workers=args.num_workers,
@@ -265,10 +293,19 @@ def main(args):
 
     ckpt = torch.load(args.resume, map_location='cpu', weights_only=False) if args.resume else None
     model = build_model(args, dataset_train, ckpt).to(device)
+    ema = None
+    if args.ema and not args.eval:
+        # the averaged copy is made before the criterion is attached (it only ever runs forward); when continuing an EMA
+        # checkpoint, 'model' holds the averaged weights (now in both copies) and 'model_raw' the trained ones
+        ema = ModelEMA(model, decay=args.ema_decay, tau=args.ema_tau)
+        if ckpt is not None and ckpt.get('model_raw') is not None and ckpt['args'].get('session') == args.session:
+            model.load_state_dict(ckpt['model_raw']); ema.load_state_dict(ckpt.get('ema', {}))
+        print(f"EMA of the weights: decay {args.ema_decay}, warm-up {args.ema_tau:g} steps, {ema.updates} updates so far")
     model.attach_criterion()
     model_without_ddp = model
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu]); model_without_ddp = model.module
+    eval_model = ema.module if ema is not None else model_without_ddp               # what is validated and checkpointed as 'model'
 
     optimizer = build_optimizer(model_without_ddp, args)
     lf = lambda x: ((1 + math.cos(x * math.pi / args.epochs)) / 2) * (1 - args.lrf) + args.lrf
@@ -311,21 +348,21 @@ def main(args):
         if args.distributed:
             sampler_train.set_epoch(epoch)
         train_stats = train_one_epoch(model, loader_train, optimizer, device, epoch, max_norm=args.max_norm, scaler=scaler,
-                                      accumulate=args.accumulate, logger=logger, flip=not args.no_flip)
+                                      accumulate=args.accumulate, logger=logger, flip=not args.no_flip, aug=aug, ema=ema)
         scheduler.step()
         # loader_val is not sharded, so every rank would evaluate the whole val set and only rank 0 would use
         # the numbers; the other ranks simply wait at the next epoch's first all-reduce.
         if utils.is_main_process():
-            val = evaluate(model_without_ddp, loader_val, device, logger=logger, epoch=epoch, tag='val', **eval_kw)
+            val = evaluate(eval_model, loader_val, device, logger=logger, epoch=epoch, tag='val', **eval_kw)
             if args.session == 'A' and model_without_ddp.filter_bank.weight_vector:      # no gate in a --raw-bands control or the --rgb_images baseline
                 w = model_without_ddp.filter_bank.weights.detach().cpu().numpy(); volts = model_without_ddp.selected_voltages
                 logger.histogram('gate/weights', w, epoch); logger.scalars({'gate/max': w.max(), 'gate/entropy': float(model_without_ddp.filter_bank.entropy().detach())}, epoch)
                 order = np.argsort(-w)[:20]; logger.table('gate/top20', ['rank', 'voltage', 'weight'], [[r + 1, float(volts[i]), float(w[i])] for r, i in enumerate(order)], epoch)
             score = select_score(val, args.select_keys)
             if score > best:                                     # before model_{epoch}, so it stores the best including this epoch
-                best = score; save_checkpoint(os.path.join(args.output_dir, 'model_best'), model_without_ddp, optimizer, scaler, scheduler, epoch, args, best)
+                best = score; save_checkpoint(os.path.join(args.output_dir, 'model_best'), model_without_ddp, optimizer, scaler, scheduler, epoch, args, best, ema)
             if (epoch + 1) % args.save_every == 0 or epoch + 1 == args.epochs:
-                save_checkpoint(os.path.join(args.output_dir, f'model_{epoch}'), model_without_ddp, optimizer, scaler, scheduler, epoch, args, best)
+                save_checkpoint(os.path.join(args.output_dir, f'model_{epoch}'), model_without_ddp, optimizer, scaler, scheduler, epoch, args, best, ema)
             with open(results_path, 'a') as f:
                 f.write(json.dumps({'epoch': epoch, 'train': train_stats, 'val': val, 'best': list(best)}) + '\n')
     print(f"Training time {datetime.timedelta(seconds=int(time.time() - start))}, best {tuple(args.select_keys)} = {best}")
