@@ -22,10 +22,14 @@ flagged (`read_noise_db = 40`); the headline results are noise-free.
 
 | input | channels | AP50 | recall50 | ROI coverage | boxes / image |
 |---|---|---|---|---|---|
+| greedy-10 + aug + EMA | 10 | 0.749 | 0.831 | 0.845 | 2.28 |
 | greedy-10 | 10 | 0.739 | 0.817 | 0.808 | 1.55 |
+| greedy-10 + aug + EMA, train + val | 10 | 0.738 | 0.868 | 0.803 | 2.27 |
+| greedy-10 + aug + EMA, yolo26m | 10 | 0.731 | 0.786 | 0.786 | 1.56 |
 | greedy-24 | 24 | 0.719 | 0.777 | 0.738 | 1.09 |
 | greedy-10 (seed 2) | 10 | 0.708 | 0.780 | 0.744 | 1.19 |
 | greedy-10 (seed 1) | 10 | 0.685 | 0.769 | 0.730 | 1.16 |
+| raw 133 + aug + EMA | 133 | 0.667 | 0.763 | 0.735 | 1.41 |
 | raw-PCA-40 | 40 | 0.664 | 0.738 | 0.730 | 1.25 |
 | PCA-11 | 11 | 0.663 | 0.766 | 0.713 | 1.20 |
 | raw 133 | 133 | 0.662 | 0.749 | 0.741 | 1.49 |
@@ -52,6 +56,14 @@ Training-seed spread (fixed checkpoints, per seed):
 Whitening vs. selection controls (raw bands whitened to K principal directions):
 - raw-PCA-10: AP50 0.519, recall50 0.608, ROI coverage 0.608; greedy-10 − raw-PCA-10 = +0.220 [+0.112, +0.322]; raw-PCA-10 − raw 133 = -0.143 [-0.244, -0.041]
 - raw-PCA-40: AP50 0.664, recall50 0.738, ROI coverage 0.730; greedy-10 − raw-PCA-40 = +0.075 [+0.004, +0.148]; raw-PCA-40 − raw 133 = +0.002 [-0.099, +0.095]
+
+Recall without new data (scale / crop + photometric jitter and a weight EMA; the yolo26m backbone; training on train + val — `bash_files/launch_aug_queue.sh`;
+their boxes scored end to end in the box-study table, kind "new detector"):
+- greedy-10 + aug + EMA: AP50 0.749, recall50 0.831, ROI coverage 0.845, boxes / image 2.283; − greedy-10 (seed 42): AP50 +0.010 [-0.038, +0.065], recall50 +0.014 [-0.017, +0.051], ROI coverage +0.037 [+0.009, +0.070]
+- greedy-10 + aug + EMA, yolo26m: AP50 0.731, recall50 0.786, ROI coverage 0.786, boxes / image 1.563; − greedy-10 (seed 42): AP50 -0.009 [-0.094, +0.082], recall50 -0.031 [-0.101, +0.034], ROI coverage -0.022 [-0.093, +0.040]
+- greedy-10 + aug + EMA, train + val: AP50 0.737, recall50 0.868, ROI coverage 0.803, boxes / image 2.274; − greedy-10 (seed 42): AP50 -0.002 [-0.065, +0.064], recall50 +0.051 [+0.008, +0.101], ROI coverage -0.006 [-0.076, +0.058]
+- raw 133 + aug + EMA: AP50 0.667, recall50 0.763, ROI coverage 0.735, boxes / image 1.411; − raw 133 (seed 42): AP50 +0.005 [-0.057, +0.067], recall50 +0.014 [-0.053, +0.083], ROI coverage -0.006 [-0.068, +0.053]
+- greedy-10 + aug + EMA − raw 133 + aug + EMA: AP50 +0.082 [-0.003, +0.172], ROI coverage +0.110 [+0.030, +0.192]
 
 Model-best (validation-selected) checkpoints are in `tables/det_model_best.csv`; they are not used for the comparisons (the selection rule
 ignores AP50 and often picks early epochs).
@@ -100,8 +112,19 @@ The ec10 segmenters (seed 0) scored end to end with other box sets than their de
 | fuse_raw_ec10_union | fused / merged boxes | 5 | 134 | 52 | 0.887 | 0.873 / 0.694 | 0.856 / 0.645 | 0.875 / 0.702 | — |
 | full_frame | no detector | 0 | 70 | 0 | 1.000 | 0.732 / 0.433 | 0.529 / 0.119 | 0.712 / 0.390 | 0.051 / 0.003 |
 | windows_512 | no detector | 0 | 1050 | 838 | 0.817 | 0.782 / 0.487 | 0.454 / 0.086 | 0.863 / 0.670 | 0.033 / 0.003 |
+| raw133_aug_A | new detector | 11 | 105 | 25 | 0.775 | 0.841 / 0.635 | 0.844 / 0.633 | 0.842 / 0.639 | — |
+| raw133_aug_A_c0.001_k15 | new detector | 4 | 417 | 237 | 0.803 | 0.806 / 0.560 | 0.786 / 0.503 | 0.808 / 0.583 | — |
+| sel10g_aug_A | new detector | 8 | 135 | 55 | 0.789 | 0.851 / 0.661 | 0.843 / 0.645 | 0.850 / 0.656 | — |
+| sel10g_aug_A_c0.001_k15 | new detector | 1 | 580 | 344 | 0.873 | 0.828 / 0.592 | 0.810 / 0.561 | 0.826 / 0.590 | — |
+| sel10g_aug_A_m99 | new detector | 5 | 159 | 71 | 0.873 | 0.864 / 0.674 | 0.862 / 0.665 | 0.874 / 0.705 | — |
+| sel10g_aug_A_m99_c0.005_k5 | new detector | 5 | 205 | 109 | 0.873 | 0.855 / 0.655 | 0.847 / 0.634 | 0.864 / 0.678 | — |
+| sel10g_aug_A_m99_c0.01_k5 | new detector | 5 | 184 | 93 | 0.873 | 0.860 / 0.667 | 0.857 / 0.656 | 0.868 / 0.694 | — |
+| sel10g_aug_m_A | new detector | 3 | 139 | 65 | 0.831 | 0.848 / 0.647 | 0.817 / 0.600 | 0.853 / 0.663 | — |
+| sel10g_aug_m_A_c0.001_k15 | new detector | 2 | 461 | 276 | 0.845 | 0.830 / 0.598 | 0.796 / 0.546 | 0.836 / 0.615 | — |
+| sel10g_aug_tv_A | new detector | 7 | 155 | 70 | 0.803 | 0.841 / 0.636 | 0.835 / 0.615 | 0.841 / 0.632 | — |
+| sel10g_aug_tv_A_c0.001_k15 | new detector | 4 | 621 | 352 | 0.915 | 0.841 / 0.617 | 0.798 / 0.538 | 0.836 / 0.611 | — |
 
-Best operating point for SAM2-UNet: ec10 operating point c0.001_k15 (S 0.875 vs 0.852 at the default): the trained segmenters suppress most of the extra false-positive boxes, so recall is worth more than precision at this stage. Merging overlapping boxes at the default point: S 0.853 (union) / 0.853 (wbf) vs 0.852 — imperfect boxes cost almost nothing, the detector's cost is the frames it leaves without a box. No detector (SAM2-UNet / SAM2.1+box / ZoomNeXt S): whole frame as one ROI 0.732 / 0.529 / 0.712, 512-px window grid 0.782 / 0.454 / 0.863 (zero-shot SAM2.1 0.051 / 0.033). Whether the detector is needed therefore depends on the segmenter: the COD-pretrained ZoomNeXt comes within 0.01 S of its detector-guided default from the dense grid (IoU 0.670 vs 0.680, at 15 segmenter passes per image instead of <= 5), while the SAM2-based segmenters do not (SAM2-UNet 0.782; SAM2.1+box 0.454, because a box prompt presupposes an object and most empty windows get a mask). For the window grid the 'GT inside ROI' column counts only objects that fit inside one window; the pasted-back map covers every pixel. The segmenters were trained on object-centred ROIs, so the no-detector rows are a bound on what the detector adds, not a trained full-frame baseline.
+Best operating point for SAM2-UNet: ec10 operating point c0.001_k15 (S 0.875 vs 0.852 at the default): the trained segmenters suppress most of the extra false-positive boxes, so recall is worth more than precision at this stage. Merging overlapping boxes at the default point: S 0.853 (union) / 0.853 (wbf) vs 0.852 — imperfect boxes cost almost nothing, the detector's cost is the frames it leaves without a box. No detector (SAM2-UNet / SAM2.1+box / ZoomNeXt S): whole frame as one ROI 0.732 / 0.529 / 0.712, 512-px window grid 0.782 / 0.454 / 0.863 (zero-shot SAM2.1 0.051 / 0.033). Whether the detector is needed therefore depends on the segmenter: the COD-pretrained ZoomNeXt comes within 0.01 S of its detector-guided default from the dense grid (IoU 0.670 vs 0.680, at 15 segmenter passes per image instead of <= 5), while the SAM2-based segmenters do not (SAM2-UNet 0.782; SAM2.1+box 0.454, because a box prompt presupposes an object and most empty windows get a mask). For the window grid the 'GT inside ROI' column counts only objects that fit inside one window; the pasted-back map covers every pixel. The segmenters were trained on object-centred ROIs, so the no-detector rows are a bound on what the detector adds, not a trained full-frame baseline. New detectors (recall study, `bash_files/launch_aug_queue.sh`; <det run> = its model_best export, <det run>_m99* = the last checkpoint): greedy-10 + aug + EMA with model_99 at the default operating point gives S 0.864 / 0.862 / 0.874 (SAM2-UNet / SAM2.1+box / ZoomNeXt) against 0.852 / 0.852 / 0.856 with the reference boxes; its validation-selected model_best (0.851 / 0.843 / 0.850) and the yolo26m, train + val and raw + aug detectors do not improve on the reference; lowering the augmented detector's threshold hurts (it already emits twice the boxes).
 
 ## 4. Claims and the evidence behind them
 

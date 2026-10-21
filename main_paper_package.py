@@ -39,6 +39,10 @@ DET_RUNS = {
     'sel24g_clean_A': ('greedy-24', '24 greedy-selected EC readings, whitened', 24, 42, 0),
     'rawpca10_A': ('raw-PCA-10', 'raw 133 cube bands whitened to 10 principal directions', 10, 42, 0),
     'rawpca40_A': ('raw-PCA-40', 'raw 133 cube bands whitened to 40 principal directions', 40, 42, 0),
+    'sel10g_aug_A': ('greedy-10 + aug + EMA', '10 greedy EC readings, whitened; scale / crop + photometric jitter, weight EMA', 10, 42, 0),
+    'sel10g_aug_m_A': ('greedy-10 + aug + EMA, yolo26m', 'as greedy-10 + aug + EMA with the yolo26m backbone', 10, 42, 0),
+    'sel10g_aug_tv_A': ('greedy-10 + aug + EMA, train + val', 'as greedy-10 + aug + EMA trained on the 279 train + val images', 10, 42, 0),
+    'raw133_aug_A': ('raw 133 + aug + EMA', 'raw 133 cube bands, standardised; scale / crop + photometric jitter, weight EMA', 133, 42, 0),
     'rgb_A': ('RGB', "the dataset's RGB image, 3 channels", 3, 42, 0),
     'sel10g_A': ('greedy-10, 40 dB', '10 greedy EC readings, 40 dB read noise, noise-regularised whitening', 10, 42, 40),
     'sel10b_A': ('gate-10, 40 dB', 'gate top-10 EC readings, 40 dB read noise, whitened', 10, 42, 40),
@@ -47,7 +51,7 @@ DET_RUNS = {
 }
 DET_METRICS = ['ap50', 'recall50', 'matched_iou', 'recall50_op', 'coverage_recall99_roi_op', 'dets_per_image_op']
 # the noise-free comparison folders, most complete first: a run's fixed-checkpoint means come from the first that holds it
-DET_COMPARE_CLEAN = ['compare_rawpca_seeds', 'compare_clean', 'compare_rgb', 'compare_clean_detB']
+DET_COMPARE_CLEAN = ['compare_aug', 'compare_rawpca_seeds', 'compare_clean', 'compare_rgb', 'compare_clean_detB']
 DET_COMPARE_NOISE = ['compare_sel_all', 'compare_sel10']
 SEG_MODELS = {'sam2unet': 'SAM2-UNet', 'sam2box': 'SAM2.1 + box prompt (LoRA)', 'zoomnext': 'ZoomNeXt-B2', 'sam2box_zs': 'SAM2.1 + box, zero-shot'}
 SEG_ARMS = {'raw': 'raw 133 bands', 'ec10': '10 EC readings (greedy-10)', 'ec24': '24 EC readings (greedy-24)', 'rgb': 'pseudo-RGB (3 band means)'}
@@ -358,6 +362,15 @@ def main(args):
         for d in sorted(glob.glob(os.path.join(args.results_dir, folder, '*', 'compare.json'))):
             name = os.path.basename(os.path.dirname(d))
             box_sets.append((name, kind, os.path.dirname(d), os.path.join(args.results_dir, 'det', f'rois_{name}_test.json')))
+    # the recall study's detectors (launch_aug_queue.sh): <det run> = its model_best export at the default operating point,
+    # <det run>_<tag> = an export under results/det/rois_op/<name>/ (another checkpoint and / or operating point)
+    for d in sorted(glob.glob(os.path.join(args.results_dir, 'seg_aug', '*', 'compare.json'))):
+        name = os.path.basename(os.path.dirname(d))
+        run = max((r for r in DET_RUNS if name == r or name.startswith(r + '_')), key=len, default=None)
+        if run is None:
+            missing.append(d); continue
+        roi_file = os.path.join(args.results_dir, 'det', f'rois_{run}_test.json') if name == run else os.path.join(args.results_dir, 'det', 'rois_op', name, f'rois_{run}_test.json')
+        box_sets.append((name, 'new detector', os.path.dirname(d), roi_file))
     for label, kind, out_dir, roi_file in box_sets:
         if not os.path.isfile(roi_file):
             missing.append(roi_file); continue
@@ -436,6 +449,16 @@ def main(args):
             rawpca_txt += f"- {DET_RUNS[run][0]}: AP50 {dm(run)}, recall50 {dm(run, 'recall50')}, ROI coverage {dm(run, 'coverage_recall99_roi_op')}; greedy-10 − {DET_RUNS[run][0]} = {dcomp('sel10g_clean_A', run)}; {DET_RUNS[run][0]} − raw 133 = {dcomp(run, 'raw133_A')}\n"
     if not rawpca_txt:
         rawpca_txt = '- raw-PCA-10 / raw-PCA-40 and the extra seeds: not yet in results/det/compare_rawpca_seeds (queue bash_files/launch_rawpca_seeds_queue.sh)\n'
+    aug_txt = ''
+    for run in ('sel10g_aug_A', 'sel10g_aug_m_A', 'sel10g_aug_tv_A', 'raw133_aug_A'):
+        if run in det_means:
+            ref = 'raw133_A' if run.startswith('raw') else 'sel10g_clean_A'
+            aug_txt += (f"- {DET_RUNS[run][0]}: AP50 {dm(run)}, recall50 {dm(run, 'recall50')}, ROI coverage {dm(run, 'coverage_recall99_roi_op')}, boxes / image {dm(run, 'dets_per_image_op')}; "
+                        f"− {DET_RUNS[ref][0]} (seed 42): AP50 {dcomp(run, ref)}, recall50 {dcomp(run, ref, 'recall50')}, ROI coverage {dcomp(run, ref, 'coverage_recall99_roi_op')}\n")
+    if 'sel10g_aug_A' in det_means and 'raw133_aug_A' in det_means:
+        aug_txt += f"- greedy-10 + aug + EMA − raw 133 + aug + EMA: AP50 {dcomp('sel10g_aug_A', 'raw133_aug_A')}, ROI coverage {dcomp('sel10g_aug_A', 'raw133_aug_A', 'coverage_recall99_roi_op')}\n"
+    if not aug_txt:
+        aug_txt = '- not yet in results/det/compare_aug (queue bash_files/launch_aug_queue.sh)\n'
     strict = (f"S {gS(GR, 'sam2unet|rgb')}, IoU {gS(GR, 'sam2unet|rgb', k='IoU')}; ec10 chain − strict RGB chain (SAM2-UNet) {scomp(CR, 'full_det', 'sam2unet: ec10 - rgb')} S, "
               f"{scomp(CR, 'full_det', 'sam2unet: ec10 - rgb', 'IoU')} IoU; raw chain − strict RGB chain {scomp(CR, 'full_det', 'sam2unet: raw - rgb')}; "
               f"zero-shot SAM2.1 with rgb_A boxes S {gS(GR, 'sam2box_zs|rgb')}") if GR else 'not evaluated'
@@ -476,6 +499,9 @@ Training-seed spread (fixed checkpoints, per seed):
 {seeds_txt or '- single seed (42) per detector so far\n'}
 Whitening vs. selection controls (raw bands whitened to K principal directions):
 {rawpca_txt}
+Recall without new data (scale / crop + photometric jitter and a weight EMA; the yolo26m backbone; training on train + val — `bash_files/launch_aug_queue.sh`;
+their boxes scored end to end in the box-study table, kind "new detector"):
+{aug_txt}
 Model-best (validation-selected) checkpoints are in `tables/det_model_best.csv`; they are not used for the comparisons (the selection rule
 ignores AP50 and often picks early epochs).
 
@@ -554,7 +580,13 @@ Extended Data: per-image detection hits (`det_per_image.csv`), model_last vs mod
                      f"{bget(BASE_SET, 'zoomnext', 'IoU')}, at 15 segmenter passes per image instead of <= 5), while the SAM2-based segmenters do not (SAM2-UNet "
                      f"{bget('windows_512', 'sam2unet')}; SAM2.1+box {bget('windows_512', 'sam2box')}, because a box prompt presupposes an object and most empty windows get a mask). "
                      f"For the window grid the 'GT inside ROI' column counts only objects that fit inside one window; the pasted-back map covers every pixel. The segmenters were trained on "
-                     f"object-centred ROIs, so the no-detector rows are a bound on what the detector adds, not a trained full-frame baseline.\n\n" if best else '\n'))
+                     f"object-centred ROIs, so the no-detector rows are a bound on what the detector adds, not a trained full-frame baseline."
+                     + (f" New detectors (recall study, `bash_files/launch_aug_queue.sh`; <det run> = its model_best export, <det run>_m99* = the last checkpoint): greedy-10 + aug + EMA with "
+                        f"model_99 at the default operating point gives S {bget('sel10g_aug_A_m99', 'sam2unet')} / {bget('sel10g_aug_A_m99', 'sam2box')} / {bget('sel10g_aug_A_m99', 'zoomnext')} "
+                        f"(SAM2-UNet / SAM2.1+box / ZoomNeXt) against {bget(BASE_SET, 'sam2unet')} / {bget(BASE_SET, 'sam2box')} / {bget(BASE_SET, 'zoomnext')} with the reference boxes; its "
+                        f"validation-selected model_best ({bget('sel10g_aug_A', 'sam2unet')} / {bget('sel10g_aug_A', 'sam2box')} / {bget('sel10g_aug_A', 'zoomnext')}) and the yolo26m, train + val "
+                        f"and raw + aug detectors do not improve on the reference; lowering the augmented detector's threshold hurts (it already emits twice the boxes)." if bget('sel10g_aug_A_m99', 'sam2unet') != 'n/a' else '')
+                     + "\n\n" if best else '\n'))
         md = md.replace('## 4. Claims and the evidence behind them', box_md + '## 4. Claims and the evidence behind them', 1)
     with open(os.path.join(out, 'results_summary.md'), 'w') as f:
         f.write(md)

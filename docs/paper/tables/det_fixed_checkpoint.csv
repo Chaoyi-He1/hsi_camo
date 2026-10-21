@@ -1,13 +1,17 @@
 run,label,input,channels,seed,read_noise_db,ckpt_epochs,source,ap50,recall50,matched_iou,recall50_op,coverage_recall99_roi_op,dets_per_image_op
-sel10g_clean_A,greedy-10,"10 greedy-selected EC readings, whitened",10,42,0,59 69 79 89 99,compare_rawpca_seeds,0.7393,0.8169,0.8173,0.769,0.8085,1.5514
+sel10g_aug_A,greedy-10 + aug + EMA,"10 greedy EC readings, whitened; scale / crop + photometric jitter, weight EMA",10,42,0,59 69 79 89 99,compare_aug,0.7492,0.831,0.8231,0.8085,0.8451,2.2829
+sel10g_clean_A,greedy-10,"10 greedy-selected EC readings, whitened",10,42,0,59 69 79 89 99,compare_aug,0.7393,0.8169,0.8173,0.769,0.8085,1.5514
+sel10g_aug_tv_A,"greedy-10 + aug + EMA, train + val",as greedy-10 + aug + EMA trained on the 279 train + val images,10,42,0,59 69 79 89 99,compare_aug,0.7375,0.8676,0.8274,0.7887,0.8028,2.2743
+sel10g_aug_m_A,"greedy-10 + aug + EMA, yolo26m",as greedy-10 + aug + EMA with the yolo26m backbone,10,42,0,59 69 79 89 99,compare_aug,0.7305,0.7859,0.8183,0.7577,0.7859,1.5629
 sel24g_clean_A,greedy-24,"24 greedy-selected EC readings, whitened",24,42,0,59 69 79 89 99,compare_clean,0.7194,0.7775,0.818,0.7155,0.738,1.0886
-sel10g_clean_A_s2,greedy-10 (seed 2),"10 greedy-selected EC readings, whitened",10,2,0,59 69 79 89 99,compare_rawpca_seeds,0.708,0.7803,0.8106,0.7239,0.7437,1.1857
-sel10g_clean_A_s1,greedy-10 (seed 1),"10 greedy-selected EC readings, whitened",10,1,0,59 69 79 89 99,compare_rawpca_seeds,0.6849,0.769,0.8069,0.7099,0.7296,1.1571
+sel10g_clean_A_s2,greedy-10 (seed 2),"10 greedy-selected EC readings, whitened",10,2,0,59 69 79 89 99,compare_aug,0.708,0.7803,0.8106,0.7239,0.7437,1.1857
+sel10g_clean_A_s1,greedy-10 (seed 1),"10 greedy-selected EC readings, whitened",10,1,0,59 69 79 89 99,compare_aug,0.6849,0.769,0.8069,0.7099,0.7296,1.1571
+raw133_aug_A,raw 133 + aug + EMA,"raw 133 cube bands, standardised; scale / crop + photometric jitter, weight EMA",133,42,0,59 69 79 89 99,compare_aug,0.6673,0.7634,0.8044,0.6817,0.7352,1.4114
 rawpca40_A,raw-PCA-40,raw 133 cube bands whitened to 40 principal directions,40,42,0,59 69 79 89 99,compare_rawpca_seeds,0.6638,0.738,0.8044,0.6901,0.7296,1.2514
 pca11_A,PCA-11,344 EC readings whitened to 11 principal directions,11,42,0,59 69 79 89 99,compare_rawpca_seeds,0.6628,0.7662,0.8145,0.6817,0.7127,1.2
-raw133_A,raw 133,"raw 133 cube bands, standardised",133,42,0,59 69 79 89 99,compare_rawpca_seeds,0.6618,0.7493,0.8265,0.7183,0.7408,1.4914
-raw133_A_s2,raw 133 (seed 2),"raw 133 cube bands, standardised",133,2,0,59 69 79 89 99,compare_rawpca_seeds,0.6466,0.7493,0.8175,0.6676,0.7296,1.2886
-raw133_A_s1,raw 133 (seed 1),"raw 133 cube bands, standardised",133,1,0,59 69 79 89 99,compare_rawpca_seeds,0.6457,0.7239,0.811,0.6761,0.7239,1.5686
+raw133_A,raw 133,"raw 133 cube bands, standardised",133,42,0,59 69 79 89 99,compare_aug,0.6618,0.7493,0.8265,0.7183,0.7408,1.4914
+raw133_A_s2,raw 133 (seed 2),"raw 133 cube bands, standardised",133,2,0,59 69 79 89 99,compare_aug,0.6466,0.7493,0.8175,0.6676,0.7296,1.2886
+raw133_A_s1,raw 133 (seed 1),"raw 133 cube bands, standardised",133,1,0,59 69 79 89 99,compare_aug,0.6457,0.7239,0.811,0.6761,0.7239,1.5686
 sel10b_clean_A,gate-10 whitened,"session A's gate top-10 EC readings, whitened",10,42,0,59 69 79 89 99,compare_clean,0.5817,0.6451,0.8096,0.5803,0.6197,0.8314
 sel10u_clean_A,uniform-10,"10 uniformly spaced EC readings, whitened",10,42,0,59 69 79 89 99,compare_clean,0.5798,0.6507,0.8058,0.5859,0.6423,1.0457
 rawpca10_A,raw-PCA-10,raw 133 cube bands whitened to 10 principal directions,10,42,0,59 69 79 89 99,compare_rawpca_seeds,0.5191,0.6085,0.7937,0.5606,0.6085,1.0171
