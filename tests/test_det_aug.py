@@ -102,6 +102,13 @@ def test_model_ema_averages_and_round_trips():
     assert abs(warm.current_decay() - 0.992 * (1 - math.exp(-1 / 128.0))) < 1e-9
     fresh = ModelEMA(m); fresh.load_state_dict(warm.state_dict())
     assert fresh.updates == 1 and fresh.decay == 0.992 and fresh.tau == 128.0
+    # BatchNorm statistics are averaged, a constant buffer is copied bit for bit (a rebuilt Stage-2 front end must equal it)
+    bn = torch.nn.Sequential(torch.nn.BatchNorm1d(2)); bn.register_buffer('const', torch.tensor([0.1, 0.2, 0.3]))
+    e = ModelEMA(bn, decay=0.5, tau=1e-9)
+    bn[0].running_mean.fill_(4.0); bn.const.mul_(3.0)
+    e.update(bn)
+    torch.testing.assert_close(e.module[0].running_mean, torch.full((2,), 2.0))      # 0.5 * 0 + 0.5 * 4
+    assert torch.equal(e.module.const, bn.const) and e.module[0].num_batches_tracked == bn[0].num_batches_tracked
 
 
 def test_main_det_with_augmentation_ema_and_train_on_val(synthetic_root, tmp_path, monkeypatch, capsys):

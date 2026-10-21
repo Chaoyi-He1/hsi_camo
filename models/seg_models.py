@@ -79,12 +79,15 @@ class ArmFrontEnd(nn.Module):
 def check_filter_bank(fb, det_state):
     '''
     Assert that a rebuilt FilterBank equals the one stored in the detector checkpoint (det_state = ckpt['model'], keys
-    'filter_bank.<buffer>'), so the arm's channels are bit-identical to what its detector saw (spec §3, §9).
+    'filter_bank.<buffer>'), so the arm's channels are those its detector saw (spec §3, §9). Equality up to float rounding
+    (rtol 1e-5): the checkpoints of the EMA detectors (main_det --ema, before 2026-10-21) hold the constant buffers after
+    thousands of x * d + x * (1 - d) updates, 1e-7 away from the rebuilt values; a wrong detector differs at O(1).
     '''
     ref = {k[len('filter_bank.'):]: v for k, v in det_state.items() if k.startswith('filter_bank.')}
     own = fb.state_dict()
     assert set(ref) == set(own), f"filter bank tensors differ from the detector checkpoint: rebuilt {sorted(own)}, checkpoint {sorted(ref)}"
-    bad = [k for k in own if own[k].shape != ref[k].shape or not torch.equal(own[k].cpu(), ref[k].cpu())]
+    bad = [k for k in own if own[k].shape != ref[k].shape
+           or not torch.allclose(own[k].cpu().float(), ref[k].cpu().float(), rtol=1e-5, atol=1e-6)]
     assert not bad, f"rebuilt filter bank != detector checkpoint in {bad} (wrong --det_ckpt for this arm, or changed band stats?)"
 
 

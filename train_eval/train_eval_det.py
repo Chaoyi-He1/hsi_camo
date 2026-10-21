@@ -102,9 +102,10 @@ def random_gain(img, gain=0.0, tilt=0.0, generator=None):
 class ModelEMA:
     '''
     Exponential moving average of the model weights, updated once per optimizer step with the ultralytics-style warm-up
-    decay_t = decay * (1 - exp(-t / tau)), so the average tracks the raw weights closely at the start. Floating-point
-    buffers (BatchNorm statistics, the filter-bank tensors) are averaged too; integer buffers are copied. The averaged copy
-    is evaluated and checkpointed in place of the raw weights (main_det stores the raw ones under 'model_raw').
+    decay_t = decay * (1 - exp(-t / tau)), so the average tracks the raw weights closely at the start. Parameters and the
+    BatchNorm statistics (running_mean / running_var) are averaged; every other buffer (the filter-bank tensors, counters)
+    is copied, so constants stay bit-identical to the trained model's (a rebuilt front end must match them, Stage 2). The
+    averaged copy is evaluated and checkpointed in place of the raw weights (main_det stores the raw ones under 'model_raw').
     '''
 
     def __init__(self, model, decay=0.992, tau=128.0):
@@ -112,6 +113,7 @@ class ModelEMA:
         for p in self.module.parameters():
             p.requires_grad_(False)
         self.decay, self.tau, self.updates = float(decay), float(tau), 0
+        self.averaged = {n for n, _ in model.named_parameters()} | {n for n, _ in model.named_buffers() if n.endswith(('running_mean', 'running_var'))}
 
     def current_decay(self):
         return self.decay * (1.0 - math.exp(-self.updates / self.tau)) if self.tau > 0 else self.decay
@@ -123,7 +125,7 @@ class ModelEMA:
         msd = model.state_dict()
         for k, v in self.module.state_dict().items():
             src = msd[k].detach()
-            if v.dtype.is_floating_point:
+            if v.dtype.is_floating_point and k in self.averaged:
                 v.mul_(d).add_(src.to(v.dtype), alpha=1.0 - d)
             else:
                 v.copy_(src)
