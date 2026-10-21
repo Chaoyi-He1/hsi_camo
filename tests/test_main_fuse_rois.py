@@ -29,6 +29,23 @@ def test_fuse_frame_merges_overlapping_boxes_into_one_regrown_roi():
     assert main_fuse_rois.fuse_frame([a, b], merge='union', iou_merge=0.9)['rois'][0] == [0, 0, 30, 30, 0.9]
 
 
+def test_cluster_merge_keeps_the_n_most_confident_object_clusters():
+    '''The "at most N objects per image" prior: overlapping / adjacent boxes form one object (enclosing box), the N most confident
+    clusters survive, the rest are dropped as false positives.'''
+    a = {'rois': [[0, 0, 40, 40, 0.9], [8, 0, 48, 40, 0.3], [60, 60, 80, 80, 0.5], [0, 60, 20, 80, 0.4], [20, 1, 30, 11, 0.2]],
+         'boxes': [[10, 10, 20, 20, 0.9], [15, 12, 28, 22, 0.3], [65, 65, 75, 75, 0.5], [2, 65, 12, 75, 0.4], [21, 2, 29, 10, 0.2]], 'gt_boxes': []}
+    assert main_fuse_rois.linked([10, 10, 20, 20], [15, 12, 28, 22]) and main_fuse_rois.linked([10, 10, 20, 20], [20, 10, 30, 20])   # overlap, touch
+    assert not main_fuse_rois.linked([10, 10, 20, 20], [22, 10, 32, 20]) and main_fuse_rois.linked([10, 10, 20, 20], [22, 10, 32, 20], link_gap=0.2)   # 2 px gap, side 10
+    f = main_fuse_rois.fuse_frame([a], merge='cluster', max_rois=2, roi_min=20, frame_hw=(100, 100))
+    # clusters: {0.9, 0.3} overlap -> enclosing box; {0.5}; {0.4}; {0.2} touches neither (gap 1 px) -> four clusters, the two most confident kept
+    assert f['boxes'][0] == [10.0, 10.0, 28.0, 22.0, 0.9] and f['boxes'][1][:4] == [65, 65, 75, 75] and len(f['boxes']) == 2
+    assert f['rois'][0] == [5.5, 6.0, 32.5, 26.0, 0.9] and f['rois'][1] == [60, 60, 80, 80, 0.5]      # merged box re-grown: centre (19, 16), 18 x 12 -> 27 x 20 (height lifted to the minimum); a lone box keeps its ROI
+    g = main_fuse_rois.fuse_frame([a], merge='cluster', max_rois=2, link_gap=0.2, roi_min=20, frame_hw=(100, 100))
+    assert g['boxes'][0][:4] == [10.0, 2.0, 29.0, 22.0]                                            # the 0.2 box (1 px away) joins the first cluster
+    assert len(main_fuse_rois.fuse_frame([a], merge='cluster')['boxes']) == 4                           # max_rois 0 keeps every cluster
+    assert main_fuse_rois.fuse_frame([{'rois': [], 'boxes': [], 'gt_boxes': []}], merge='cluster', max_rois=2)['boxes'] == []
+
+
 def test_main_writes_the_fused_export_over_the_union_of_frames(tmp_path, capsys):
     e1 = {'7': {'rois': [[0, 0, 20, 20, 0.9]], 'boxes': [[5, 5, 15, 15, 0.9]], 'gt_boxes': [[6, 6, 14, 14]]}, '8': {'rois': [], 'boxes': [], 'gt_boxes': [[30, 30, 40, 40]]}}
     e2 = {'8': {'rois': [[28, 28, 42, 42, 0.4]], 'boxes': [[31, 31, 39, 39, 0.4]], 'gt_boxes': [[30, 30, 40, 40]]}, '9': {'rois': [], 'boxes': [], 'gt_boxes': []}}

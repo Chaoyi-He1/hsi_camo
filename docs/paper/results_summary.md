@@ -102,7 +102,13 @@ The ec10 segmenters (seed 0) scored end to end with other box sets than their de
 | ec10 operating point c0.005_k5 | operating point | 5 | 155 | 45 | 0.845 | 0.863 / 0.686 | 0.862 / 0.684 | 0.868 / 0.700 | — |
 | ec10 operating point c0.01_k5 | operating point | 5 | 139 | 41 | 0.831 | 0.856 / 0.674 | 0.857 / 0.675 | 0.863 / 0.692 | — |
 | ec10 operating point c0.02_k10 | operating point | 6 | 118 | 29 | 0.817 | 0.852 / 0.669 | 0.852 / 0.666 | 0.856 / 0.680 | — |
+| aug_m99_cl2 | fused / merged boxes | 5 | 95 | 34 | 0.831 | 0.868 / 0.690 | 0.864 / 0.684 | 0.873 / 0.704 | — |
+| ec10_c0.001_cl1 | fused / merged boxes | 4 | 66 | 7 | 0.831 | 0.860 / 0.676 | 0.857 / 0.676 | 0.860 / 0.686 | — |
+| ec10_c0.001_cl2 | fused / merged boxes | 4 | 98 | 35 | 0.873 | 0.869 / 0.689 | 0.864 / 0.681 | 0.868 / 0.693 | — |
+| ec10_c0.001_cl2_gap | fused / merged boxes | 4 | 98 | 35 | 0.873 | 0.869 / 0.689 | 0.861 / 0.672 | 0.868 / 0.693 | — |
+| ec10_c0.001_top2 | fused / merged boxes | 4 | 117 | 26 | 0.845 | 0.860 / 0.679 | 0.864 / 0.688 | 0.865 / 0.696 | — |
 | ec10_c0.005_union | fused / merged boxes | 5 | 111 | 37 | 0.845 | 0.864 / 0.689 | 0.863 / 0.685 | 0.868 / 0.700 | — |
+| ec10_cl2 | fused / merged boxes | 6 | 80 | 20 | 0.817 | 0.849 / 0.660 | 0.849 / 0.661 | 0.855 / 0.676 | — |
 | ec10_union | fused / merged boxes | 6 | 89 | 23 | 0.817 | 0.853 / 0.671 | 0.853 / 0.666 | 0.856 / 0.680 | — |
 | ec10_wbf | fused / merged boxes | 6 | 89 | 23 | 0.817 | 0.853 / 0.669 | 0.852 / 0.666 | 0.857 / 0.681 | — |
 | fuse_ec10_seeds | fused / merged boxes | 5 | 149 | 50 | 0.859 | 0.862 / 0.690 | 0.855 / 0.669 | 0.863 / 0.693 | — |
