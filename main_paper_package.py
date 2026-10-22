@@ -40,6 +40,8 @@ DET_RUNS = {
     'rawpca10_A': ('raw-PCA-10', 'raw 133 cube bands whitened to 10 principal directions', 10, 42, 0),
     'rawpca40_A': ('raw-PCA-40', 'raw 133 cube bands whitened to 40 principal directions', 40, 42, 0),
     'sel10g_aug_A': ('greedy-10 + aug + EMA', '10 greedy EC readings, whitened; scale / crop + photometric jitter, weight EMA', 10, 42, 0),
+    'sel10g_aug_A_s1': ('greedy-10 + aug + EMA (seed 1)', '10 greedy EC readings, whitened; scale / crop + photometric jitter, weight EMA', 10, 1, 0),
+    'sel10g_aug_A_s2': ('greedy-10 + aug + EMA (seed 2)', '10 greedy EC readings, whitened; scale / crop + photometric jitter, weight EMA', 10, 2, 0),
     'sel10g_aug_m_A': ('greedy-10 + aug + EMA, yolo26m', 'as greedy-10 + aug + EMA with the yolo26m backbone', 10, 42, 0),
     'sel10g_aug_tv_A': ('greedy-10 + aug + EMA, train + val', 'as greedy-10 + aug + EMA trained on the 279 train + val images', 10, 42, 0),
     'raw133_aug_A': ('raw 133 + aug + EMA', 'raw 133 cube bands, standardised; scale / crop + photometric jitter, weight EMA', 133, 42, 0),
@@ -51,7 +53,9 @@ DET_RUNS = {
 }
 DET_METRICS = ['ap50', 'recall50', 'matched_iou', 'recall50_op', 'coverage_recall99_roi_op', 'dets_per_image_op']
 # the noise-free comparison folders, most complete first: a run's fixed-checkpoint means come from the first that holds it
-DET_COMPARE_CLEAN = ['compare_aug', 'compare_rawpca_seeds', 'compare_clean', 'compare_rgb', 'compare_clean_detB']
+DET_COMPARE_CLEAN = ['compare_aug_seeds', 'compare_aug', 'compare_rawpca_seeds', 'compare_clean', 'compare_rgb', 'compare_clean_detB']
+FINAL_DET = 'sel10g_aug_A_m99'      # the final pipeline's detector: sel10g_aug_A's last (EMA) checkpoint, published as weights/sel10g_aug_A_m99/model_best
+FINAL_DET_METRICS_RUN = 'sel10g_aug_A'   # its fixed-checkpoint metrics are those of the run it comes from
 DET_COMPARE_NOISE = ['compare_sel_all', 'compare_sel10']
 SEG_MODELS = {'sam2unet': 'SAM2-UNet', 'sam2box': 'SAM2.1 + box prompt (LoRA)', 'zoomnext': 'ZoomNeXt-B2', 'sam2box_zs': 'SAM2.1 + box, zero-shot'}
 SEG_ARMS = {'raw': 'raw 133 bands', 'ec10': '10 EC readings (greedy-10)', 'ec24': '24 EC readings (greedy-24)', 'rgb': 'pseudo-RGB (3 band means)'}
@@ -231,7 +235,10 @@ def main(args):
     manifest['voltage_selection'] = os.path.join(figs, 'voltage_selection.json')
 
     # ---------------------------------------------------------------- 4. Stage-2 groups, comparisons, per-run numbers
-    seg_sets = {'model_best': 'seg', 'model_last': 'seg_last', 'strict_rgb_chain': 'seg_rgbdet'}
+    # result sets: the campaign (model_best / model_last), the strict RGB chain, and the FINAL pipeline (segmenters trained on the
+    # final detector's boxes, bash_files/launch_seg_final_queue.sh; arm 'ec10' with the sel10g_aug_A_m99 boxes -> labelled 'ec10 final')
+    seg_sets = {'model_best': 'seg', 'model_last': 'seg_last', 'strict_rgb_chain': 'seg_rgbdet', 'final': 'seg_final', 'final_last': 'seg_final_last'}
+    FINAL_SETS = ('final', 'final_last')
     seg = {}
     for tag, d in seg_sets.items():
         p = os.path.join(args.results_dir, d, 'compare.json')
@@ -240,6 +247,8 @@ def main(args):
         else:
             missing.append(p)
     assert 'model_best' in seg, f"{os.path.join(args.results_dir, 'seg', 'compare.json')} is required"
+    def arm_label(tag, arm):
+        return f"10 EC readings (greedy-10), final detector {FINAL_DET} boxes" if tag in FINAL_SETS and arm == 'ec10' else SEG_ARMS.get(arm, arm)
     grows, crows = [], []
     for tag, c in seg.items():
         for g, st in c['groups'].items():
@@ -248,7 +257,7 @@ def main(args):
                 if lvl not in st:
                     continue
                 for k, v in st[lvl].items():
-                    grows.append(dict(result_set=tag, model=model, model_label=SEG_MODELS.get(model, model), arm=arm, arm_label=SEG_ARMS.get(arm, arm), level=lvl, metric=k,
+                    grows.append(dict(result_set=tag, model=model, model_label=SEG_MODELS.get(model, model), arm=arm, arm_label=arm_label(tag, arm), level=lvl, metric=k,
                                       mean=r4(v['mean']), std=r4(v['std']), n_seeds=v['n'], runs=' '.join(st['runs'])))
         for lvl, comps in c['comparisons'].items():
             for label, v in comps.items():
@@ -258,7 +267,7 @@ def main(args):
     manifest['seg_groups'] = write_csv(os.path.join(tables, 'seg_groups.csv'), grows)
     manifest['seg_paired_differences'] = write_csv(os.path.join(tables, 'seg_paired_differences.csv'), crows)
     prows, pi_rows = [], []
-    for tag, d in (('model_best', 'seg'), ('strict_rgb_chain', 'seg_rgbdet')):
+    for tag, d in (('model_best', 'seg'), ('strict_rgb_chain', 'seg_rgbdet'), ('final', 'seg_final')):
         root = os.path.join(args.results_dir, d)
         if not os.path.isdir(root):
             continue
@@ -306,8 +315,10 @@ def main(args):
     # ---------------------------------------------------------------- 5. end-to-end chains and the paper-protocol table
     G = seg['model_best']['groups']
     GR = seg['strict_rgb_chain']['groups'] if 'strict_rgb_chain' in seg else {}
+    GF = seg['final']['groups'] if 'final' in seg else {}
     per_run0 = {r['run']: r for r in prows if r['result_set'] == 'model_best'}
     per_run_rgb = {r['run']: r for r in prows if r['result_set'] == 'strict_rgb_chain'}
+    per_run_final = {r['run']: r for r in prows if r['result_set'] == 'final'}
     def det_of(arm):
         return {'raw': 'raw133_A', 'ec10': 'sel10g_clean_A', 'ec24': 'sel24g_clean_A', 'rgb': 'rgb_A'}[arm]
     def chain_row(label, arm, det_run, groups, prun, seg_label):
@@ -326,15 +337,30 @@ def main(args):
               chain_row('pseudo-RGB control chain (raw133_A boxes)', 'rgb', 'raw133_A', G, per_run0.get('seg_sam2unet_rgb_s0'), 'SAM2-UNet trained on pseudo-RGB; zero-shot SAM2.1')]
     if GR:
         chains.append(chain_row('strict RGB chain (rgb_A boxes)', 'rgb', 'rgb_A', GR, per_run_rgb.get('seg_sam2unet_rgb_s0'), 'SAM2-UNet trained on pseudo-RGB; zero-shot SAM2.1'))
+    if GF:
+        # the final pipeline: the fixed-checkpoint detector metrics are those of the run the checkpoint comes from
+        frow = chain_row(f'final ec10 chain ({FINAL_DET} = aug + EMA detector, last checkpoint)', 'ec10', FINAL_DET_METRICS_RUN, GF, per_run_final.get('seg_sam2unet_ec10f_s0'),
+                         f'trained on the {FINAL_DET} boxes')
+        frow['detector'] = FINAL_DET
+        chains.append(frow)
     manifest['end_to_end_chains'] = write_csv(os.path.join(tables, 'end_to_end_chains.csv'), chains)
+    # the final chain against the reference ec10 chain, paired by image and seed (paired_chain_bootstrap.py -> seg_final/chain_vs_reference.json)
+    cvr = os.path.join(args.results_dir, 'seg_final', 'chain_vs_reference.json')
+    if os.path.isfile(cvr):
+        cv = json.load(open(cvr))
+        manifest['final_chain_vs_reference'] = write_csv(os.path.join(tables, 'final_chain_vs_reference.csv'),
+                                                         [dict(model=m, model_label=SEG_MODELS.get(m, m), metric=k, level=cv['level'], **{kk: r4(vv) if isinstance(vv, float) else vv for kk, vv in v.items()},
+                                                               significant=int(v['lo'] > 0 or v['hi'] < 0)) for m, d in cv['result'].items() for k, v in d.items()])
+    else:
+        cv = None; missing.append(cvr)
     pub = [dict(source='HyperCOD paper, arXiv 2601.03736 Table 2', method=m, input='full image, no boxes, 280 training images', S=s, E_mean=e, MAE=mae, F_adp=f) for m, s, e, mae, f in PUBLISHED]
-    for tag, groups in (('model_best', G), ('strict_rgb_chain', GR)):
+    for tag, groups in (('model_best', G), ('strict_rgb_chain', GR), ('final', GF)):
         for g, st in groups.items():
             if 'full_det_paper' not in st or (tag == 'strict_rgb_chain' and not g.endswith('|rgb')):
                 continue
             model, arm = g.split('|'); p = st['full_det_paper']
-            pub.append(dict(source=f'this work ({tag}), level (c), paper protocol', method=f"{SEG_MODELS.get(model, model)} on {SEG_ARMS.get(arm, arm)}",
-                            input=f"boxes of {'rgb_A' if tag == 'strict_rgb_chain' else det_of(arm if arm != 'rgb' else 'raw')}; outside the ROI = 0; 251 train + 28 val images",
+            pub.append(dict(source=f'this work ({tag}), level (c), paper protocol', method=f"{SEG_MODELS.get(model, model)} on {arm_label(tag, arm)}",
+                            input=f"boxes of {'rgb_A' if tag == 'strict_rgb_chain' else (FINAL_DET if tag == 'final' else det_of(arm if arm != 'rgb' else 'raw'))}; outside the ROI = 0; 251 train + 28 val images",
                             S=r4(p['S']['mean']), E_mean=r4(p['E_mean']['mean']), MAE=r4(p['MAE']['mean']), F_adp=r4(p['F_adp']['mean']), n_seeds=p['S']['n']))
     manifest['paper_protocol_vs_published'] = write_csv(os.path.join(tables, 'paper_protocol_vs_published.csv'), pub)
 
@@ -371,14 +397,25 @@ def main(args):
             missing.append(d); continue
         roi_file = os.path.join(args.results_dir, 'det', f'rois_{run}_test.json') if name == run else os.path.join(args.results_dir, 'det', 'rois_op', name, f'rois_{run}_test.json')
         box_sets.append((name, 'new detector', os.path.dirname(d), roi_file))
+    # the final pipeline's segmenters (seg_<model>_ec10f_s0) with the final detector's boxes at other operating points / clustered
+    # (bash_files/launch_seg_final_op.sh): <name> = default export clustered (..._cl2) or results/det/rois_op/<name>/
+    for d in sorted(glob.glob(os.path.join(args.results_dir, 'seg_final_op', '*', 'compare.json'))):
+        name = os.path.basename(os.path.dirname(d))
+        roi_file = os.path.join(args.results_dir, 'det', f'rois_{name}_test.json')
+        if not os.path.isfile(roi_file):
+            roi_file = os.path.join(args.results_dir, 'det', 'rois_op', name, f'rois_{FINAL_DET}_test.json')
+        box_sets.append((name, 'final pipeline', os.path.dirname(d), roi_file))
+    if os.path.isfile(os.path.join(args.results_dir, 'seg_final', 'compare.json')):
+        box_sets.append((f'{FINAL_DET} default (final segmenters)', 'final pipeline', os.path.join(args.results_dir, 'seg_final'), os.path.join(args.results_dir, 'det', f'rois_{FINAL_DET}_test.json')))
     for label, kind, out_dir, roi_file in box_sets:
         if not os.path.isfile(roi_file):
             missing.append(roi_file); continue
         row = dict(box_set=label, kind=kind, **box_stats(roi_file))
+        suffix = 'ec10f' if kind == 'final pipeline' else 'ec10'
         for m in ('sam2unet', 'sam2box', 'zoomnext', 'sam2box_zs'):
             if m == 'sam2box_zs' and kind == 'baseline':
                 continue                                            # the queue's zero-shot control used raw133_A's boxes, not this set
-            p = os.path.join(out_dir, 'zs_sam2box_rgb' if m == 'sam2box_zs' else f'seg_{m}_ec10_s0', 'eval_full_det.json')
+            p = os.path.join(out_dir, 'zs_sam2box_rgb' if m == 'sam2box_zs' else f'seg_{m}_{suffix}_s0', 'eval_full_det.json')
             if os.path.isfile(p):
                 e = json.load(open(p)); s = e['summary']
                 if m != 'sam2box_zs':
@@ -588,6 +625,26 @@ Extended Data: per-image detection hits (`det_per_image.csv`), model_last vs mod
                         f"and raw + aug detectors do not improve on the reference; lowering the augmented detector's threshold hurts (it already emits twice the boxes)." if bget('sel10g_aug_A_m99', 'sam2unet') != 'n/a' else '')
                      + "\n\n" if best else '\n'))
         md = md.replace('## 4. Claims and the evidence behind them', box_md + '## 4. Claims and the evidence behind them', 1)
+    if GF:
+        def gstat(groups, m, lvl='full_det', k='S'):
+            g = groups.get(f'{m}|ec10')
+            return f"{g[lvl][k]['mean']:.3f} ± {g[lvl][k]['std']:.3f}" if g and lvl in g else 'n/a'
+        def cvt(m, k='S'):
+            v = (cv or {}).get('result', {}).get(m, {}).get(k)
+            return ci_text(dict(diff=v['diff'], lo=v['lo'], hi=v['hi'])) if v else 'n/a'
+        fr = per_run_final.get('seg_sam2unet_ec10f_s0', {}); rr = per_run0.get('seg_sam2unet_ec10_s0', {})
+        oracle_final = '; '.join(f"{SEG_MODELS[m]} {gstat(GF, m, 'roi_oracle')} / {gstat(GF, m, 'full_oracle')}" for m in ('sam2unet', 'sam2box', 'zoomnext'))
+        oracle_ref = '; '.join(f"{SEG_MODELS[m]} {gstat(G, m, 'roi_oracle')} / {gstat(G, m, 'full_oracle')}" for m in ('sam2unet', 'sam2box', 'zoomnext'))
+        final_md = (f'## 3c. Final pipeline — the detector with scale / photometric jitter + EMA (last checkpoint, `{FINAL_DET}`) and segmenters trained on its boxes (`tables/end_to_end_chains.csv`, `tables/final_chain_vs_reference.csv`)\n\n'
+                    f'Three segmenters × 3 seeds trained with the final detector\'s train / val boxes (`bash_files/launch_seg_final_queue.sh`, result set `final` in `tables/seg_groups.csv` / `seg_per_run.csv`), '
+                    f'scored end to end with its test boxes at the default operating point (conf ≥ 0.02, top 5): {fr.get("n_frames_no_roi", "n/a")} images without a box, {fr.get("n_det_rois", "n/a")} boxes, '
+                    f'{fr.get("n_fp_rois", "n/a")} false positives (reference ec10 chain: {rr.get("n_frames_no_roi", "n/a")} / {rr.get("n_det_rois", "n/a")} / {rr.get("n_fp_rois", "n/a")}). '
+                    f'Paired by image and seed (2000 frame bootstraps):\n\n'
+                    '| model | reference ec10 chain S | final chain S | final − reference S [95 % CI] | reference IoU | final IoU | final − reference IoU | final − reference Fw |\n|---|---|---|---|---|---|---|---|\n'
+                    + ''.join(f"| {SEG_MODELS[m]} | {gstat(G, m)} | {gstat(GF, m)} | {cvt(m)} | {gstat(G, m, k='IoU')} | {gstat(GF, m, k='IoU')} | {cvt(m, 'IoU')} | {cvt(m, 'Fw')} |\n" for m in ('sam2unet', 'sam2box', 'zoomnext'))
+                    + f'\nOracle-box levels of the final segmenters (a) / (b), S: {oracle_final} (reference: {oracle_ref}). '
+                    'Operating-point / object-count-prior rows of the final chain: `tables/box_study.csv`, kind "final pipeline".\n\n')
+        md = md.replace('## 4. Claims and the evidence behind them', final_md + '## 4. Claims and the evidence behind them', 1)
     with open(os.path.join(out, 'results_summary.md'), 'w') as f:
         f.write(md)
     json.dump(dict(files={k: (os.path.relpath(v, out) if v else None) for k, v in manifest.items()}, missing=missing), open(os.path.join(out, 'manifest.json'), 'w'), indent=1)

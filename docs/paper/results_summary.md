@@ -23,9 +23,11 @@ flagged (`read_noise_db = 40`); the headline results are noise-free.
 | input | channels | AP50 | recall50 | ROI coverage | boxes / image |
 |---|---|---|---|---|---|
 | greedy-10 + aug + EMA | 10 | 0.749 | 0.831 | 0.845 | 2.28 |
+| greedy-10 + aug + EMA (seed 2) | 10 | 0.749 | 0.856 | 0.839 | 2.15 |
 | greedy-10 | 10 | 0.739 | 0.817 | 0.808 | 1.55 |
 | greedy-10 + aug + EMA, train + val | 10 | 0.738 | 0.868 | 0.803 | 2.27 |
 | greedy-10 + aug + EMA, yolo26m | 10 | 0.731 | 0.786 | 0.786 | 1.56 |
+| greedy-10 + aug + EMA (seed 1) | 10 | 0.727 | 0.825 | 0.837 | 2.73 |
 | greedy-24 | 24 | 0.719 | 0.777 | 0.738 | 1.09 |
 | greedy-10 (seed 2) | 10 | 0.708 | 0.780 | 0.744 | 1.19 |
 | greedy-10 (seed 1) | 10 | 0.685 | 0.769 | 0.730 | 1.16 |
@@ -51,6 +53,7 @@ Paired differences (AP50, 95 % CI from 2000 paired image bootstraps; sign = firs
 
 Training-seed spread (fixed checkpoints, per seed):
 - raw 133: AP50 0.651 ± 0.009 (n = 3: 0.646–0.662); recall50 0.741 ± 0.015; ROI coverage 0.732 ± 0.009
+- greedy-10 + aug + EMA: AP50 0.742 ± 0.013 (n = 3: 0.727–0.749); recall50 0.838 ± 0.017; ROI coverage 0.840 ± 0.004
 - greedy-10: AP50 0.711 ± 0.027 (n = 3: 0.685–0.739); recall50 0.789 ± 0.025; ROI coverage 0.761 ± 0.042
 
 Whitening vs. selection controls (raw bands whitened to K principal directions):
@@ -125,6 +128,8 @@ The ec10 segmenters (seed 0) scored end to end with other box sets than their de
 | sel10g_aug_A_m99 | new detector | 5 | 159 | 71 | 0.873 | 0.864 / 0.674 | 0.862 / 0.665 | 0.874 / 0.705 | — |
 | sel10g_aug_A_m99_c0.005_k5 | new detector | 5 | 205 | 109 | 0.873 | 0.855 / 0.655 | 0.847 / 0.634 | 0.864 / 0.678 | — |
 | sel10g_aug_A_m99_c0.01_k5 | new detector | 5 | 184 | 93 | 0.873 | 0.860 / 0.667 | 0.857 / 0.656 | 0.868 / 0.694 | — |
+| sel10g_aug_A_s1_m99 | new detector | 7 | 195 | 105 | 0.859 | 0.847 / 0.640 | 0.832 / 0.594 | 0.860 / 0.666 | — |
+| sel10g_aug_A_s2_m99 | new detector | 4 | 152 | 65 | 0.873 | 0.864 / 0.685 | 0.854 / 0.666 | 0.863 / 0.683 | — |
 | sel10g_aug_m_A | new detector | 3 | 139 | 65 | 0.831 | 0.848 / 0.647 | 0.817 / 0.600 | 0.853 / 0.663 | — |
 | sel10g_aug_m_A_c0.001_k15 | new detector | 2 | 461 | 276 | 0.845 | 0.830 / 0.598 | 0.796 / 0.546 | 0.836 / 0.615 | — |
 | sel10g_aug_tv_A | new detector | 7 | 155 | 70 | 0.803 | 0.841 / 0.636 | 0.835 / 0.615 | 0.841 / 0.632 | — |
@@ -179,3 +184,5 @@ Extended Data: per-image detection hits (`det_per_image.csv`), model_last vs mod
 - `tables/box_study.csv`
 - `tables/compute.csv`
 - `figure_data/det_per_image.csv.gz`
+
+Missing inputs (skipped): `results/seg_final/compare.json`, `results/seg_final_last/compare.json`, `results/seg_final/chain_vs_reference.json`

@@ -18,5 +18,9 @@
   "compute": "tables/compute.csv",
   "det_per_image": "figure_data/det_per_image.csv.gz"
  },
- "missing": []
+ "missing": [
+  "results/seg_final/compare.json",
+  "results/seg_final_last/compare.json",
+  "results/seg_final/chain_vs_reference.json"
+ ]
 }
