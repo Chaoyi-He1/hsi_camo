@@ -1,0 +1,19 @@
+model,model_label,metric,level,reference_mean,reference_std,final_mean,final_std,diff,lo,hi,p_gt0,n_boot,n_frames,significant
+sam2unet,SAM2-UNet,S,full_det,0.8493,0.0041,0.8564,0.0055,0.0072,-0.0202,0.0376,0.6965,2000,70,0
+sam2unet,SAM2-UNet,IoU,full_det,0.6678,0.0078,0.6592,0.0152,-0.0086,-0.0618,0.0473,0.392,2000,70,0
+sam2unet,SAM2-UNet,Fw,full_det,0.7143,0.0062,0.7065,0.0133,-0.0078,-0.0669,0.0523,0.4165,2000,70,0
+sam2unet,SAM2-UNet,MAE,full_det,0.0019,0.0001,0.0018,0.0001,-0.0001,-0.0008,0.0004,0.4045,2000,70,0
+sam2unet,SAM2-UNet,E_adp,full_det,0.8593,0.0062,0.8485,0.005,-0.0109,-0.0546,0.0354,0.34,2000,70,0
+sam2unet,SAM2-UNet,F_adp,full_det,0.6809,0.0118,0.6703,0.0087,-0.0106,-0.0666,0.0476,0.365,2000,70,0
+sam2box,SAM2.1 + box prompt (LoRA),S,full_det,0.8565,0.0038,0.8802,0.0039,0.0237,-0.0066,0.0561,0.945,2000,70,0
+sam2box,SAM2.1 + box prompt (LoRA),IoU,full_det,0.6743,0.0079,0.7149,0.0064,0.0406,-0.0164,0.0981,0.9235,2000,70,0
+sam2box,SAM2.1 + box prompt (LoRA),Fw,full_det,0.7181,0.0087,0.7646,0.0061,0.0465,-0.0145,0.1086,0.9355,2000,70,0
+sam2box,SAM2.1 + box prompt (LoRA),MAE,full_det,0.0017,0.0,0.0014,0.0001,-0.0002,-0.0009,0.0003,0.222,2000,70,0
+sam2box,SAM2.1 + box prompt (LoRA),E_adp,full_det,0.8659,0.006,0.883,0.0091,0.0171,-0.026,0.0595,0.8015,2000,70,0
+sam2box,SAM2.1 + box prompt (LoRA),F_adp,full_det,0.6833,0.0092,0.73,0.007,0.0467,-0.0123,0.1058,0.944,2000,70,0
+zoomnext,ZoomNeXt-B2,S,full_det,0.854,0.0037,0.8788,0.0023,0.0249,-0.0015,0.0553,0.968,2000,70,0
+zoomnext,ZoomNeXt-B2,IoU,full_det,0.6754,0.0065,0.7129,0.0075,0.0375,-0.0121,0.0926,0.9335,2000,70,0
+zoomnext,ZoomNeXt-B2,Fw,full_det,0.7181,0.0039,0.7624,0.0104,0.0442,-0.0105,0.104,0.943,2000,70,0
+zoomnext,ZoomNeXt-B2,MAE,full_det,0.0017,0.0,0.0014,0.0001,-0.0003,-0.0009,0.0001,0.104,2000,70,0
+zoomnext,ZoomNeXt-B2,E_adp,full_det,0.8309,0.0083,0.8554,0.0113,0.0245,-0.017,0.0682,0.887,2000,70,0
+zoomnext,ZoomNeXt-B2,F_adp,full_det,0.6401,0.0148,0.6783,0.0197,0.0382,-0.0162,0.0948,0.9225,2000,70,0

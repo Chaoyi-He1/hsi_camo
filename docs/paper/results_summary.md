@@ -134,8 +134,24 @@ The ec10 segmenters (seed 0) scored end to end with other box sets than their de
 | sel10g_aug_m_A_c0.001_k15 | new detector | 2 | 461 | 276 | 0.845 | 0.830 / 0.598 | 0.796 / 0.546 | 0.836 / 0.615 | — |
 | sel10g_aug_tv_A | new detector | 7 | 155 | 70 | 0.803 | 0.841 / 0.636 | 0.835 / 0.615 | 0.841 / 0.632 | — |
 | sel10g_aug_tv_A_c0.001_k15 | new detector | 4 | 621 | 352 | 0.915 | 0.841 / 0.617 | 0.798 / 0.538 | 0.836 / 0.611 | — |
+| sel10g_aug_A_m99_c0.001_cl2 | final pipeline | 5 | 117 | 54 | 0.831 | 0.843 / 0.631 | 0.871 / 0.694 | 0.874 / 0.700 | — |
+| sel10g_aug_A_m99_c0.001_k15 | final pipeline | 5 | 547 | 365 | 0.873 | 0.816 / 0.560 | 0.856 / 0.661 | 0.863 / 0.687 | — |
+| sel10g_aug_A_m99_cl2 | final pipeline | 5 | 95 | 34 | 0.831 | 0.849 / 0.645 | 0.879 / 0.714 | 0.876 / 0.703 | — |
+| sel10g_aug_A_m99 default (final segmenters) | final pipeline | 5 | 159 | 71 | 0.873 | 0.850 / 0.642 | 0.877 / 0.710 | 0.877 / 0.709 | — |
 
 Best operating point for SAM2-UNet: ec10 operating point c0.001_k15 (S 0.875 vs 0.852 at the default): the trained segmenters suppress most of the extra false-positive boxes, so recall is worth more than precision at this stage. Merging overlapping boxes at the default point: S 0.853 (union) / 0.853 (wbf) vs 0.852 — imperfect boxes cost almost nothing, the detector's cost is the frames it leaves without a box. No detector (SAM2-UNet / SAM2.1+box / ZoomNeXt S): whole frame as one ROI 0.732 / 0.529 / 0.712, 512-px window grid 0.782 / 0.454 / 0.863 (zero-shot SAM2.1 0.051 / 0.033). Whether the detector is needed therefore depends on the segmenter: the COD-pretrained ZoomNeXt comes within 0.01 S of its detector-guided default from the dense grid (IoU 0.670 vs 0.680, at 15 segmenter passes per image instead of <= 5), while the SAM2-based segmenters do not (SAM2-UNet 0.782; SAM2.1+box 0.454, because a box prompt presupposes an object and most empty windows get a mask). For the window grid the 'GT inside ROI' column counts only objects that fit inside one window; the pasted-back map covers every pixel. The segmenters were trained on object-centred ROIs, so the no-detector rows are a bound on what the detector adds, not a trained full-frame baseline. New detectors (recall study, `bash_files/launch_aug_queue.sh`; <det run> = its model_best export, <det run>_m99* = the last checkpoint): greedy-10 + aug + EMA with model_99 at the default operating point gives S 0.864 / 0.862 / 0.874 (SAM2-UNet / SAM2.1+box / ZoomNeXt) against 0.852 / 0.852 / 0.856 with the reference boxes; its validation-selected model_best (0.851 / 0.843 / 0.850) and the yolo26m, train + val and raw + aug detectors do not improve on the reference; lowering the augmented detector's threshold hurts (it already emits twice the boxes).
+
+## 3c. Final pipeline — the detector with scale / photometric jitter + EMA (last checkpoint, `sel10g_aug_A_m99`) and segmenters trained on its boxes (`tables/end_to_end_chains.csv`, `tables/final_chain_vs_reference.csv`)
+
+Three segmenters × 3 seeds trained with the final detector's train / val boxes (`bash_files/launch_seg_final_queue.sh`, result set `final` in `tables/seg_groups.csv` / `seg_per_run.csv`), scored end to end with its test boxes at the default operating point (conf ≥ 0.02, top 5): 5 images without a box, 159 boxes, 71 false positives (reference ec10 chain: 6 / 116 / 27). Paired by image and seed (2000 frame bootstraps):
+
+| model | reference ec10 chain S | final chain S | final − reference S [95 % CI] | reference IoU | final IoU | final − reference IoU | final − reference Fw |
+|---|---|---|---|---|---|---|---|
+| SAM2-UNet | 0.849 ± 0.004 | 0.856 ± 0.005 | +0.007 [-0.020, +0.038] | 0.668 ± 0.008 | 0.659 ± 0.015 | -0.009 [-0.062, +0.047] | -0.008 [-0.067, +0.052] |
+| SAM2.1 + box prompt (LoRA) | 0.856 ± 0.004 | 0.880 ± 0.004 | +0.024 [-0.007, +0.056] | 0.674 ± 0.008 | 0.715 ± 0.006 | +0.041 [-0.016, +0.098] | +0.047 [-0.015, +0.109] |
+| ZoomNeXt-B2 | 0.854 ± 0.004 | 0.879 ± 0.002 | +0.025 [-0.002, +0.055] | 0.675 ± 0.007 | 0.713 ± 0.008 | +0.038 [-0.012, +0.093] | +0.044 [-0.010, +0.104] |
+
+Oracle-box levels of the final segmenters (a) / (b), S: SAM2-UNet 0.894 ± 0.005 / 0.916 ± 0.005; SAM2.1 + box prompt (LoRA) 0.912 ± 0.004 / 0.931 ± 0.004; ZoomNeXt-B2 0.903 ± 0.001 / 0.922 ± 0.001 (reference: SAM2-UNet 0.899 ± 0.007 / 0.918 ± 0.005; SAM2.1 + box prompt (LoRA) 0.911 ± 0.004 / 0.932 ± 0.004; ZoomNeXt-B2 0.900 ± 0.005 / 0.920 ± 0.006). Operating-point / object-count-prior rows of the final chain: `tables/box_study.csv`, kind "final pipeline".
 
 ## 4. Claims and the evidence behind them
 
@@ -180,9 +196,8 @@ Extended Data: per-image detection hits (`det_per_image.csv`), model_last vs mod
 - `figure_data/seg_per_image.csv.gz`
 - `figure_data/seg_val_curves.csv`
 - `tables/end_to_end_chains.csv`
+- `tables/final_chain_vs_reference.csv`
 - `tables/paper_protocol_vs_published.csv`
 - `tables/box_study.csv`
 - `tables/compute.csv`
 - `figure_data/det_per_image.csv.gz`
-
-Missing inputs (skipped): `results/seg_final/compare.json`, `results/seg_final_last/compare.json`, `results/seg_final/chain_vs_reference.json`

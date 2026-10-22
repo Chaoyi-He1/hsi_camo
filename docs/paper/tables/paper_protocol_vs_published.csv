@@ -15,3 +15,6 @@ source,method,input,S,E_mean,MAE,F_adp,n_seeds
 "this work (model_best), level (c), paper protocol","SAM2.1 + box, zero-shot on pseudo-RGB (3 band means)",boxes of raw133_A; outside the ROI = 0; 251 train + 28 val images,0.772,0.7422,0.0071,0.4031,1
 "this work (strict_rgb_chain), level (c), paper protocol",SAM2-UNet on pseudo-RGB (3 band means),boxes of rgb_A; outside the ROI = 0; 251 train + 28 val images,0.7512,0.7101,0.0031,0.4745,3
 "this work (strict_rgb_chain), level (c), paper protocol","SAM2.1 + box, zero-shot on pseudo-RGB (3 band means)",boxes of rgb_A; outside the ROI = 0; 251 train + 28 val images,0.7031,0.6636,0.0064,0.2958,1
+"this work (final), level (c), paper protocol","SAM2-UNet on 10 EC readings (greedy-10), final detector sel10g_aug_A_m99 boxes",boxes of sel10g_aug_A_m99; outside the ROI = 0; 251 train + 28 val images,0.8564,0.8768,0.0018,0.6761,3
+"this work (final), level (c), paper protocol","SAM2.1 + box prompt (LoRA) on 10 EC readings (greedy-10), final detector sel10g_aug_A_m99 boxes",boxes of sel10g_aug_A_m99; outside the ROI = 0; 251 train + 28 val images,0.8801,0.895,0.0014,0.7345,3
+"this work (final), level (c), paper protocol","ZoomNeXt-B2 on 10 EC readings (greedy-10), final detector sel10g_aug_A_m99 boxes",boxes of sel10g_aug_A_m99; outside the ROI = 0; 251 train + 28 val images,0.8787,0.8977,0.0014,0.6899,3

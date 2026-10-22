@@ -13,14 +13,11 @@
   "seg_per_image": "figure_data/seg_per_image.csv.gz",
   "seg_val_curves": "figure_data/seg_val_curves.csv",
   "end_to_end_chains": "tables/end_to_end_chains.csv",
+  "final_chain_vs_reference": "tables/final_chain_vs_reference.csv",
   "paper_protocol_vs_published": "tables/paper_protocol_vs_published.csv",
   "box_study": "tables/box_study.csv",
   "compute": "tables/compute.csv",
   "det_per_image": "figure_data/det_per_image.csv.gz"
  },
- "missing": [
-  "results/seg_final/compare.json",
-  "results/seg_final_last/compare.json",
-  "results/seg_final/chain_vs_reference.json"
- ]
+ "missing": []
 }
